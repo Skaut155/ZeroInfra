@@ -1,156 +1,50 @@
-# 🚀 Guía de Instalación y Configuración del Entorno Local
+# ZeroInfra
 
-Esta guía detalla los pasos necesarios para clonar, configurar el entorno y compilar la aplicación móvil en tu equipo sin errores de dependencias o del compilador.
+Infraestructura de comunicación de emergencia para zonas sin cobertura (catástrofes): varios móviles se comunican entre sí a través de una red mallada Meshtastic sobre LoRa, sin internet ni cobertura móvil. Un nodo gateway reenvía el estado de la malla por MQTT a un backend en la nube, donde se monitoriza con Grafana.
 
----
+Proyecto de la asignatura PTI.
 
-## 1. Requisitos Previos
+## Arquitectura en breve
 
-Antes de configurar el proyecto, asegúrate de tener instaladas las siguientes herramientas:
+![Arquitectura de ZeroInfra](docs/img/arquitectura.png)
 
-1. **Git:** [Descargar Git](https://git-scm.com/) (o vía terminal: `winget install --id Git.Git -e --source winget`).
-2. **Flutter SDK (Canal Estable 3.24+):** [Descargar Flutter SDK](https://docs.flutter.dev/get-started/install/windows/mobile).
-   * Descomprime Flutter en una ruta accesible y sin permisos de administrador (por ejemplo, `C:\src\flutter`).
-   * Añade `C:\src\flutter\bin` a la variable de entorno `PATH` de tu sistema.
-3. **Android Studio:** [Descargar Android Studio](https://developer.android.com/studio).
-   * Abre Android Studio y accede a **Settings** > **Languages & Frameworks** > **Android SDK** > pestaña **SDK Tools**.
-   * Marca e instala:
-     * **Android SDK Command-line Tools (latest)**
-     * **Android SDK Platform-Tools**
-     * **Android SDK Build-Tools**
-4. **Editor:** Visual Studio Code con las extensiones oficiales **Flutter** y **Dart** instaladas.
+**Leyenda:** verde = hardware · morado = software que desarrolla el equipo
 
----
+- **Frontend:** app móvil con chat, mapa y botón SOS, conectada por BLE a un nodo Meshtastic.
+- **Red mallada:** nodos ESP32 con radio LoRa y GPS que retransmiten mensajes por multi-salto.
+- **Backend:** servicios en contenedores que reciben los datos del gateway por MQTT, los guardan y los muestran.
 
-## 2. Puesta en Marcha del Proyecto
-
-### Paso 1: Clonar el repositorio
-Abre una terminal (PowerShell o Git Bash) y descarga el proyecto:
-```bash
-git clone <URL_DEL_REPOSITORIO>
-cd zeroinfra
+## Estructura del repositorio
 
 ```
-
-### Paso 2: Descargar dependencias
-
-Instala los paquetes de Flutter declarados en `pubspec.yaml` (`flutter_blue_plus`, `protobuf`, `flutter_map`, etc.):
-
-```bash
-flutter pub get
-
+ZeroInfra/
+├── app/        # Proyecto Flutter (la app móvil)
+├── backend/    # Docker Compose: Mosquitto, base de datos, API REST y Grafana
+├── hardware/   # Placas, gateway y manuales de flasheo
+├── protos/     # Definiciones Protobuf de Meshtastic
+├── tool/       # Scripts de apoyo (generación de código desde los .proto)
+├── docs/       # Documentación del proyecto
+└── README.md
 ```
 
-### Paso 3: Instalar el NDK de Android (OBLIGATORIO)
+## Directorios: objetivo y responsables
 
-El compilador Gradle requiere la versión específica **`28.2.13676358`** del NDK de Android. Si no se encuentra instalada en el disco local, la compilación fallará arrojando el error `Package ndk not found`.
+| Directorio | Objetivo | Quién lo modifica |
+|---|---|---|
+| `app/` | Contiene la aplicación móvil Flutter con chat, mapa y SOS, que se conecta por BLE al nodo Meshtastic. | Carlos (interfaz) y Shiqi (conexión BLE y protocolo). El reparto interno está más abajo. |
+| `backend/` | Contiene los servicios en la nube que reciben los mensajes MQTT del gateway, los almacenan y los muestran en Grafana. | Andrés |
+| `hardware/` | Documenta y guarda la configuración de las placas T-Beam y del nodo gateway: flasheo, pruebas de alcance y puente MQTT. | Cristina |
+| `protos/` | Guarda una única copia de los `.proto` de Meshtastic, fijada a la versión del firmware de las placas, que usan la app y el backend. | Shiqi y Andrés. Cristina informa de la versión exacta del firmware. |
+| `tool/` | Reúne los scripts que regeneran el código Dart (y el del backend) a partir de los `.proto`. | Shiqi, y Andrés para el script del backend |
+| `docs/` | Recoge la documentación del proyecto: arquitectura, protocolo BLE, protobufs, estados de nodo, pruebas y decisiones. | Todo el equipo; cada documento lo mantiene quien trabaja esa parte |
 
-* **Opción A (Recomendada - PowerShell):**
-Ejecuta la siguiente orden en PowerShell para descargar e instalar automáticamente la versión exacta:
-```powershell
-$sdkManager = (Get-ChildItem -Path "$env:LOCALAPPDATA\Android\Sdk\cmdline-tools" -Filter "sdkmanager.bat" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
-& $sdkManager --install "ndk;28.2.13676358"
+### Reparto dentro de `app/`
 
-```
-
-
-*(Si el instalador solicita confirmación en la consola, introduce `y` y pulsa Enter).*
-* **Opción B (Manual - Android Studio):**
-1. Ve a **Tools** > **SDK Manager** (o *Settings > Languages & Frameworks > Android SDK*).
-2. Haz clic en la pestaña **SDK Tools**.
-3. En la esquina inferior derecha, marca la casilla **Show Package Details**.
-4. Despliega **NDK (Side by side)**, marca la casilla de la versión **`28.2.13676358`** y haz clic en **Apply**.
-
-
-
-### Paso 4: Validar licencias y estado del entorno
-
-Comprueba que el entorno de desarrollo esté listo y sin advertencias bloqueantes:
-
-```bash
-flutter doctor --android-licenses
-flutter doctor
-
-```
-
-*(Verifica que tanto **Flutter** como **Android toolchain** muestren el indicador verde `[✓]`).*
-
----
-
-## 3. Modos de Ejecución
-
-### Opción A: En un dispositivo Android físico (Recomendado para pruebas LoRa / BLE)
-
-1. En tu móvil Android, abre **Ajustes** > **Información del teléfono** y pulsa 7 veces sobre **Número de compilación** para habilitar las opciones de desarrollo.
-2. Entra en **Ajustes** > **Opciones de desarrollador** y activa **Depuración por USB**.
-3. Activa la **Ubicación (GPS)** en el móvil *(en Android es indispensable para que el escaneo Bluetooth BLE detecte balizas cercanas)*.
-4. Conecta el móvil al ordenador mediante cable USB, acepta la depuración en la pantalla del dispositivo y verifica que el sistema lo reconoce:
-```bash
-flutter devices
-
-```
-
-
-5. Inicia la app:
-```bash
-flutter run
-
-```
-
-
-
-### Opción B: En Emulador Android (Para pruebas visuales de interfaz)
-
-1. Abre **Android Studio** y arranca un dispositivo virtual desde el **Device Manager**.
-2. Con el emulador activo en pantalla, ejecuta:
-```bash
-flutter run
-
-```
-
-
-
-*(Nota: Los emuladores de PC no emulan antenas Bluetooth físicas, por lo que no pueden establecer conexión real con las placas ESP32).*
-
-### Opción C: En Windows Desktop (Maquetación rápida de pantallas)
-
-Para modificar interfaces y ver los cambios al instante sin necesidad de emuladores pesados:
-
-```bash
-flutter run -d windows
-
-```
-
----
-
-## 4. Solución de Problemas Frecuentes
-
-* **`Package ndk not found` o fallo en `assembleDebug`:**
-Revisa el **Paso 3**. Comprueba que la carpeta `ndk\28.2.13676358` exista en `%LOCALAPPDATA%\Android\Sdk\`.
-* **El comando `flutter` no se reconoce:**
-Asegúrate de haber añadido la carpeta `flutter\bin` al `PATH` de las variables de entorno de tu usuario y reinicia la terminal.
-* **La app no detecta placas Meshtastic por Bluetooth:**
-Verifica que el móvil físico tenga activos tanto el Bluetooth como el GPS, y que se hayan aceptado los permisos de "Dispositivos cercanos" al iniciar la app.
-
----
-
-## 5. Flujo de Trabajo en Git
-
-1. Crea siempre una rama propia antes de comenzar una tarea:
-```bash
-git checkout -b feature/nombre-de-la-tarea
-
-```
-
-
-2. Antes de subir cambios, valida que el código compila sin errores estáticos:
-```bash
-flutter analyze
-
-```
-
-
-3. Envía tus cambios al repositorio remoto:
-```bash
-git push origin feature/nombre-de-la-tarea
-```
+| Ruta (dentro de `app/`) | Quién |
+|---|---|
+| `lib/views/` (chat, mapa, SOS) | Carlos |
+| `lib/views/nodes/` (escaneo y conexión BLE) | Shiqi |
+| `lib/core/`, `lib/data/`, `lib/providers/`, `lib/generated/` | Shiqi |
+| `lib/models/` | Carlos y Shiqi, de común acuerdo |
+| `lib/main.dart` | Carlos; Shiqi solo para registrar los providers |
+| `android/`, `ios/`, `pubspec.yaml` | Quien necesite el cambio, avisando al resto |
