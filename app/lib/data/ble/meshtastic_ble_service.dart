@@ -59,7 +59,8 @@ class MeshtasticBleService {
 
   //flag para indicar que se está leyendo en fromRadio y evitar lecturas concurrentes simultánias
   bool _isReading = false;
-
+  //flag para indicar si se ha llegado un mensaje mientras estabamos procesando otro
+  bool _drainAgain = false;
 
   // Comprueba que el móvil soporta Bluetooth y empieza a vigilar el estado
   // del adaptador.
@@ -107,7 +108,7 @@ class MeshtasticBleService {
 
 
     final sub = device.connectionState.listen((state) {
-      _connectionController.add(state);
+      if (!_connectionController.isClosed) _connectionController.add(state);
       if (state == BluetoothConnectionState.disconnected) _clear();
     });
 
@@ -154,7 +155,6 @@ class MeshtasticBleService {
         _drainFromRadio();
         });
         device.cancelWhenDisconnected(fromNumSub, delayed: true, next: true);
-        await _drainFromRadio();
         /**
         Guarda la referencia del dispositivo en el estado de la clase solo después de que todas 
         las etapas anteriores hayan tenido éxito, dejando el servicio formalmente en estado conectado
@@ -188,6 +188,7 @@ class MeshtasticBleService {
     _fromNum = null;
     _device = null;
     _isReading = false;
+    _drainAgain = false;
   }
 
   // Libera los recursos del servicio.
@@ -201,17 +202,25 @@ class MeshtasticBleService {
   }
 
   // Vaciar los paquetes pendientes del buffer fromRadio (endpoint de lectura)
-  Future<void> _drainFromRadio() async{ 
-    final characteristic = _fromRadio;
-    if(characteristic == null || _isReading ) return;
+  Future<void> drainFromRadio() async{ 
+    if (_isReading) {
+      _drainAgain = true; // llegó un aviso mientras leíamos: repetir al terminar
+      return;
+    }
     _isReading = true;
     
     try{
+      do{
+
+        final characteristic = _fromRadio;
+        if(characteristic == null) return;
         while(true){
             final bytes = await characteristic.read();
             if(bytes.isEmpty) break;
             if(!_fromRadioController.isClosed) _fromRadioController.add(bytes);
         }
+      
+      } while (_drain_Again);
     } catch (e){
         debugPrint("Error al leer de fromRadio: $e");
     }finally{
