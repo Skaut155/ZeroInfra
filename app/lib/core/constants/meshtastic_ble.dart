@@ -18,7 +18,7 @@ class AppConstants {
   static const String readFromRadioUUID = "2c55e69e-4993-11ed-b878-0242ac120002";  
 
   /* UUID fromNum --> leer, notificar y escribir */
-  static const String fromNUmUUID = "ed9da18c-a800-4f66-a670-aa7547e34453";
+  static const String fromNumUUID = "ed9da18c-a800-4f66-a670-aa7547e34453";
 
   /*UUID extra para escribir notificaciones para depurar firmware (LogRecord protobuf)*/
   static const String logRecordUUID = "5a3d6e49-06e6-4423-9944-e9de8cdf9547";
