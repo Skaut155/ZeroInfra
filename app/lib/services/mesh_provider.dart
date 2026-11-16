@@ -3,6 +3,8 @@ import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 
+import '../core/emergency_codec.dart';
+import '../models/emergency_alert.dart';
 import '../models/mesh_message.dart';
 import '../models/mesh_node.dart';
 
@@ -11,6 +13,8 @@ class MeshProvider extends ChangeNotifier {
   String? _connectedNodeId = 'node_esp32_01';
   bool _isEmergencyActive = false;
   Timer? _scanTimer;
+  final Map<String, EmergencyAlert> _emergencyAlerts = {};
+  int _localNodeNum = 0x1a21fd32;
 
   final List<MeshNode> _nodes = [
     MeshNode(
@@ -57,6 +61,13 @@ class MeshProvider extends ChangeNotifier {
   bool get isScanning => _isScanning;
   String? get connectedNodeId => _connectedNodeId;
   bool get isEmergencyActive => _isEmergencyActive;
+  int get localNodeNum => _localNodeNum;
+  List<EmergencyAlert> get emergencyAlerts {
+    final list = _emergencyAlerts.values.where((a) => !a.isExpired).toList()
+      ..sort((a, b) => b.receivedAt.compareTo(a.receivedAt));
+    return List.unmodifiable(list);
+  }
+
   List<MeshNode> get nodes => List.unmodifiable(_nodes);
   List<MeshMessage> get messages => List.unmodifiable(_messages);
 
@@ -65,6 +76,151 @@ class MeshProvider extends ChangeNotifier {
       if (node.id == _connectedNodeId) return node;
     }
     return null;
+  }
+
+  void updateLocalNodeNum(int nodeNum) {
+    if (nodeNum > 0 && nodeNum <= 0xffffffff) {
+      _localNodeNum = nodeNum;
+      notifyListeners();
+    }
+  }
+
+  void onPrivateAppPacketReceived({
+    required List<int> payload,
+    required int senderNode,
+    required int destinationNode,
+    required int meshPacketId,
+    int channel = 0,
+  }) {
+    try {
+      final emg = EmgCodec.decode(payload);
+      final key = '${emg.originNode}_${emg.id}';
+
+      switch (emg.kind) {
+        case EmgKind.alert:
+          if (_emergencyAlerts.containsKey(key)) return;
+          _emergencyAlerts[key] = EmergencyAlert(
+            id: emg.id,
+            originNode: emg.originNode,
+            severity: emg.severity,
+            text: emg.text,
+            expiresUnix: emg.expiresUnix,
+            senderNode: senderNode,
+            destinationNode: destinationNode,
+            channel: channel,
+            meshPacketId: meshPacketId,
+            receivedAt: DateTime.now(),
+            status: EmergencyDeliveryStatus.networkAck,
+          );
+          _isEmergencyActive = true;
+        case EmgKind.receipt:
+          final existing = _emergencyAlerts[key];
+          if (existing != null &&
+              existing.status != EmergencyDeliveryStatus.resolved) {
+            existing.status = EmergencyDeliveryStatus.appReceipt;
+            existing.receiptFromNode = senderNode;
+          }
+        case EmgKind.resolved:
+          if (emg.originNode != senderNode) return;
+          final existing = _emergencyAlerts[key];
+          if (existing != null) {
+            existing.status = EmergencyDeliveryStatus.resolved;
+            if (emg.text.isNotEmpty) existing.resolutionNote = emg.text;
+            _updateEmergencyActive();
+          }
+        case EmgKind.replay:
+          if (_emergencyAlerts.containsKey(key)) return;
+          _emergencyAlerts[key] = EmergencyAlert(
+            id: emg.id,
+            originNode: emg.originNode,
+            severity: emg.severity,
+            text: emg.text,
+            expiresUnix: emg.expiresUnix,
+            senderNode: senderNode,
+            destinationNode: destinationNode,
+            channel: channel,
+            meshPacketId: meshPacketId,
+            receivedAt: DateTime.now(),
+            status: EmergencyDeliveryStatus.networkAck,
+            isReplay: true,
+          );
+          _isEmergencyActive = true;
+        case EmgKind.fetch:
+          break;
+      }
+      notifyListeners();
+    } on FormatException catch (error) {
+      debugPrint('Trama EMG1 inválida descartada: ${error.message}');
+    }
+  }
+
+  Future<Uint8List> sendEmgAlert({
+    required String text,
+    int severity = 3,
+    int destinationNode = 0xffffffff,
+    bool requestReceipt = false,
+    int expiresUnix = 0,
+  }) async {
+    final alertId = Random().nextInt(0x7fffffff) + 1;
+    final meshPacketId = Random().nextInt(0x7fffffff) + 1;
+    final isUnicast = destinationNode != 0xffffffff;
+    final emgMsg = EmgMessage(
+      kind: EmgKind.alert,
+      severity: severity.clamp(1, 3),
+      flags: isUnicast && requestReceipt ? 1 : 0,
+      id: alertId,
+      expiresUnix: expiresUnix,
+      originNode: _localNodeNum,
+      text: text,
+    );
+    final encodedPayload = EmgCodec.encode(emgMsg);
+    final alert = EmergencyAlert(
+      id: alertId,
+      originNode: _localNodeNum,
+      severity: emgMsg.severity,
+      text: text,
+      expiresUnix: expiresUnix,
+      senderNode: _localNodeNum,
+      destinationNode: destinationNode,
+      channel: 0,
+      meshPacketId: meshPacketId,
+      receivedAt: DateTime.now(),
+    );
+    _emergencyAlerts[alert.compositeKey] = alert;
+    _isEmergencyActive = true;
+    notifyListeners();
+    return encodedPayload;
+  }
+
+  Uint8List? buildResolvePayload(EmergencyAlert alert, {String note = ''}) {
+    if (alert.originNode != _localNodeNum) {
+      debugPrint(
+        'No se puede resolver una alerta cuyo origen no es este nodo.',
+      );
+      return null;
+    }
+    final bytes = EmgCodec.encode(
+      EmgMessage(
+        kind: EmgKind.resolved,
+        severity: 0,
+        flags: 0,
+        id: alert.id,
+        expiresUnix: 0,
+        originNode: _localNodeNum,
+        text: note,
+      ),
+    );
+    alert.status = EmergencyDeliveryStatus.resolved;
+    alert.resolutionNote = note;
+    _updateEmergencyActive();
+    notifyListeners();
+    return bytes;
+  }
+
+  void _updateEmergencyActive() {
+    _isEmergencyActive = _emergencyAlerts.values.any(
+      (a) => a.status != EmergencyDeliveryStatus.resolved && !a.isExpired,
+    );
   }
 
   List<MeshMessage> getMessagesForChannel(String? targetPeerId) {
