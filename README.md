@@ -19,7 +19,7 @@ Proyecto de la asignatura PTI.
 ```
 ZeroInfra/
 ├── app/        # Proyecto Flutter (la app móvil)
-├── backend/    # Docker Compose: Mosquitto, base de datos, API REST y Grafana
+├── backend/    # Terraform y Diferentes configuraciones: kubernetes, Mosquitto, base de datos, API REST y Grafana...
 ├── hardware/   # Placas, gateway y manuales de flasheo
 ├── protos/     # Definiciones Protobuf de Meshtastic
 ├── tool/       # Scripts de apoyo (generación de código desde los .proto)

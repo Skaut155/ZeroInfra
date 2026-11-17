@@ -53,6 +53,12 @@ dependencies:
   # Cartografía offline / OpenStreetMap (para tu visor de mapa)
   flutter_map: ^7.0.2
   latlong2: ^0.9.1
+  flutter_map_cache: ^1.1.0
+  dio: ^5.8.0+1
+  dio_cache_interceptor: ^3.5.1
+  dio_cache_interceptor_file_store: ^1.2.2
+  path_provider: ^2.1.4
+  http: ^1.2.2
 
 dev_dependencies:
   flutter_test:
