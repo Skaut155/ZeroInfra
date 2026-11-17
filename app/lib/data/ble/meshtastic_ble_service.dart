@@ -28,8 +28,8 @@ import '../../core/constants/meshtastic_ble.dart';
 class MeshtasticBleService {
   // UUID del servicio y de las características de Meshtastic. Se guardan como
   // Guid (no como texto) para compararlos sin depender del formato.
-  // Coinciden con los publicados en la Client API de Meshtastic; conviene
-  // confirmarlos contra la placa real con nRF Connect (guía, paso 2).
+  // Coinciden con los publicados en la Client API de Meshtastic
+  //TODO: (conviene confirmarlos contra la placa real con nRF Connect).------------------------------------------------
   final Guid _serviceGuid = Guid(AppConstants.meshtasticUUID);
   final Guid _toRadioGuid = Guid(AppConstants.writeToRadioUUID);
   final Guid _fromRadioGuid = Guid(AppConstants.readFromRadioUUID);
@@ -54,7 +54,6 @@ class MeshtasticBleService {
   // número con este y, si no coincide, ignora el evento.
   int _attempt = 0;
 
-  // true mientras [connect] está en marcha; evita dos conexiones simultáneas.
   bool _isConnecting = false;
 
   // Controlador (tubería/pipe) por el que se añade cualquier notificación sobre
@@ -69,8 +68,8 @@ class MeshtasticBleService {
   // Pipe por la que se añaden los bytes que llegan desde fromRadio (punto de
   // entrada de los datos a procesar). Únicamente este servicio añade datos.
   // Es `.broadcast()` para que varios puntos de la app puedan ESCUCHAR a la
-  // vez. Ojo: un stream broadcast no guarda nada; lo que se emita cuando no
-  // hay ningún oyente se pierde, así que hay que suscribirse antes de conectar.
+  // vez. Lo que se emita cuando no hay ningún oyente se pierde, así que 
+  // hay que suscribirse antes de conectar.
   final _fromRadioController = StreamController<List<int>>.broadcast();
 
   /// Bytes leídos de `fromRadio` (un evento por paquete). Los errores de
@@ -128,8 +127,8 @@ class MeshtasticBleService {
   /// Conecta con [device] (el que el usuario ha seleccionado) y encuentra los
   /// endpoints de Meshtastic: `toRadio`, `fromRadio` y `fromNum`.
   ///
-  /// - Si ya se está conectado a ese mismo dispositivo, no hace nada.
-  /// - Si se está conectado a otro, lo desconecta primero.
+  /// - Si ya se está conectando a ese mismo dispositivo, no hace nada.
+  /// - Si se está conectando a otro, lo desconecta primero.
   /// - Si ya hay otra llamada a [connect] en marcha, lanza un `StateError`.
   ///
   /// Si algo falla, deja el servicio desconectado y relanza la excepción.
@@ -167,8 +166,7 @@ class MeshtasticBleService {
 
       // Se escucha el estado ANTES de conectar para no perder ningún evento.
       // `connectionState` emite el estado actual nada más suscribirse, y en un
-      // dispositivo aún sin conectar ese estado es `disconnected`: no es una
-      // desconexión real, así que se ignora hasta haber visto un `connected`.
+      // dispositivo aún sin conectar ese estado es `disconnected`.
       _connSub = device.connectionState.listen((state) {
         if (attempt != _attempt) return; // evento de un intento anterior
         if (state == BluetoothConnectionState.connected) {
@@ -179,8 +177,6 @@ class MeshtasticBleService {
         }
         _emitConnectionState(state);
         if (state == BluetoothConnectionState.disconnected) {
-          // Desconexión real: limpiar y soltar esta suscripción. La interfaz
-          // ya ha sido avisada, así que el `catch` no debe repetir el aviso.
           sawConnected = false;
           _clear();
           final sub = _connSub;
@@ -189,10 +185,6 @@ class MeshtasticBleService {
         }
       });
 
-      // En Android, `connect()` ya pide por defecto un MTU de 512 bytes (su
-      // parámetro `mtu`), para que los mensajes Protobuf viajen sin
-      // fragmentarse; no hay que llamar además a `requestMtu`. En iOS el SO
-      // negocia el MTU automáticamente.
       await device.connect();
 
       // Tras conectar, la tabla GATT del periférico está en blanco en la memoria del móvil.
@@ -217,12 +209,11 @@ class MeshtasticBleService {
         }
       }
       // Si falta alguna de las tres características, se aborta la conexión
-      // (el `catch` de abajo desconecta).
       if (toRadio == null || fromRadio == null || fromNum == null) {
         throw StateError('Faltan características de Meshtastic en el nodo');
       }
 
-      // Escribe en el descriptor CCCD de fromNum para suscribir el móvil a
+      // Escribe en el descriptor de fromNum para suscribir el móvil a
       // sus notificaciones.
       await fromNum.setNotifyValue(true);
       // Escucha el stream de notificaciones: cada aviso de fromNum significa
@@ -230,9 +221,7 @@ class MeshtasticBleService {
       final fromNumSub = fromNum.onValueReceived.listen((_) {
         drainFromRadio();
       });
-      // flutter_blue_plus cancela esta suscripción al desconectarse el
-      // dispositivo. (`delayed` y `next` solo son para suscripciones a
-      // `connectionState` creadas antes de conectar.)
+     
       device.cancelWhenDisconnected(fromNumSub);
 
       // Si el nodo se ha desconectado durante la preparación, no dar la
@@ -291,10 +280,6 @@ class MeshtasticBleService {
   }
 
   // Olvida la conexión en caso de error o desconexión.
-  //
-  // No toca `_isReading` ni `_drainAgain` a propósito: si hay un vaciado en
-  // marcha, es su `finally` quien los libera. Si se bajaran aquí, podría
-  // arrancar un segundo vaciado en paralelo con el que aún no ha terminado.
   void _clear() {
     _toRadio = null;
     _fromRadio = null;
@@ -318,7 +303,7 @@ class MeshtasticBleService {
     await _fromRadioController.close();
   }
 
-  /// Vacía los paquetes pendientes del buzón `fromRadio`: lee repetidamente
+  /// Vacía los paquetes pendientes de `fromRadio`: lee repetidamente
   /// hasta que el nodo devuelve una lectura vacía y publica cada paquete en
   /// [fromRadioStream].
   ///

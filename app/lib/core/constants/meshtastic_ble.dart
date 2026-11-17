@@ -1,9 +1,7 @@
 /// Constantes generales de la app y de Meshtastic sobre BLE (UUID del servicio
 /// y de sus características, y dirección de broadcast de la malla).
 class AppConstants {
-  // 'static' significa que la variable pertenece a la clase en sí, 
-  // no necesitas crear una instancia (un objeto) para usarla.
-  // 'const' indica que su valor es fijo y se conoce en tiempo de compilación.
+  
   static const String appName = "ZeroInfra";
   
   /// Dirección de destino para enviar a toda la malla (broadcast).
@@ -23,6 +21,6 @@ class AppConstants {
   static const String fromNumUUID = "ed9da18c-a800-4f66-a670-aa7547e34453";
 
   /// UUID extra por el que el nodo notifica sus registros de depuración del
-  /// firmware (LogRecord protobuf). La app todavía no lo usa.
+  /// firmware (LogRecord protobuf).
   static const String logRecordUUID = "5a3d6e49-06e6-4423-9944-e9de8cdf9547";
 }

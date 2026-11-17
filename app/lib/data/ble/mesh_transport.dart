@@ -1,7 +1,6 @@
 import '../../models/discovered_device.dart';
 
-/// Transporte de bytes entre la app y el nodo Meshtastic, sin saber nada de
-/// Protobuf.
+/// Transporte de bytes entre la app y el nodo Meshtastic
 ///
 /// Lo usa `MeshtasticClient`. La implementación real es `BleMeshTransport`;
 /// los tests usan una de mentira.

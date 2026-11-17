@@ -26,15 +26,11 @@ class PermissionService {
 
   /// Lista de permisos que exige este móvil para usar BLE.
   ///
-  /// - **Android 12 o superior:** escaneo y conexión Bluetooth. No hace falta
-  ///   la ubicación, porque el manifiesto declara BLUETOOTH_SCAN con
-  ///   `neverForLocation`.
+  /// - **Android 12 o superior:** escaneo y conexión Bluetooth. 
   /// - **Android 11 o inferior:** solo la ubicación (sin ella el escaneo BLE
   ///   no devuelve resultados). Los permisos Bluetooth antiguos se conceden
   ///   al instalar y no se piden en ejecución.
   /// - **iOS:** el permiso de Bluetooth.
-  ///
-  /// La ubicación para el mapa o el SOS es otro asunto y no se pide aquí.
   static Future<List<Permission>> _requiredPermissions() async {
     if (kIsWeb) return const <Permission>[];
     switch (defaultTargetPlatform) {
