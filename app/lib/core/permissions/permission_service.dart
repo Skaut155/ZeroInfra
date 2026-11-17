@@ -1,28 +1,90 @@
+import 'package:device_info_plus/device_info_plus.dart';
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:permission_handler/permission_handler.dart';
 
+/// Resultado de comprobar o pedir los permisos que necesita el BLE.
+enum BlePermissionStatus {
+  /// Todos los permisos necesarios están concedidos: se puede escanear y conectar.
+  granted,
+
+  /// Falta algún permiso, pero se puede volver a pedir.
+  denied,
+
+  /// Falta algún permiso y el sistema ya no mostrará el diálogo: el usuario
+  /// tiene que concederlo desde los ajustes (ver `openAppSettings()` de
+  /// permission_handler).
+  permanentlyDenied,
+}
+
+/// Permisos del sistema operativo que hacen falta para escanear y conectar
+/// por BLE. Dependen de la plataforma y de la versión de Android.
 class PermissionService {
-  
-  /// Solicita los permisos necesarios para BLE y ubicación al sistema operativo
-  static Future<bool> requestBluetoothPermissions() async {
-    // 1. Agrupamos los permisos que Android e iOS exigen para escanear y conectar por BLE
-    Map<Permission, PermissionStatus> statuses = await [
-      Permission.bluetoothScan,
-      Permission.bluetoothConnect,
-      Permission.location, // Necesario en muchas versiones de Android para el escaneo BLE
-    ].request();
+  // Primera versión de Android (12, API 31) con los permisos BLUETOOTH_SCAN y
+  // BLUETOOTH_CONNECT.
+  static const int _android12Sdk = 31;
 
-    // 2. Verificamos si todos los permisos solicitados han sido concedidos
-    bool allGranted = statuses.values.every((status) => status.isGranted);
-
-    // 3. Devolvemos true si podemos continuar, o false si falta alguno
-    return allGranted;
+  /// Lista de permisos que exige este móvil para usar BLE.
+  ///
+  /// - **Android 12 o superior:** escaneo y conexión Bluetooth. No hace falta
+  ///   la ubicación, porque el manifiesto declara BLUETOOTH_SCAN con
+  ///   `neverForLocation`.
+  /// - **Android 11 o inferior:** solo la ubicación (sin ella el escaneo BLE
+  ///   no devuelve resultados). Los permisos Bluetooth antiguos se conceden
+  ///   al instalar y no se piden en ejecución.
+  /// - **iOS:** el permiso de Bluetooth.
+  ///
+  /// La ubicación para el mapa o el SOS es otro asunto y no se pide aquí.
+  static Future<List<Permission>> _requiredPermissions() async {
+    if (kIsWeb) return const <Permission>[];
+    switch (defaultTargetPlatform) {
+      case TargetPlatform.android:
+        final info = await DeviceInfoPlugin().androidInfo;
+        if (info.version.sdkInt >= _android12Sdk) {
+          return [Permission.bluetoothScan, Permission.bluetoothConnect];
+        }
+        return [Permission.location];
+      case TargetPlatform.iOS:
+        return [Permission.bluetooth];
+      default:
+        return const <Permission>[];
+    }
   }
 
-  /// Comprueba de forma rápida si los permisos ya estaban concedidos previamente
-  static Future<bool> checkPermissions() async {
-    bool scanGranted = await Permission.bluetoothScan.isGranted;
-    bool connectGranted = await Permission.bluetoothConnect.isGranted;
-    
-    return scanGranted && connectGranted;
+  // Resume el estado de varios permisos en uno solo.
+  static BlePermissionStatus _combine(Iterable<PermissionStatus> statuses) {
+    if (statuses.every((s) => s.isGranted)) {
+      return BlePermissionStatus.granted;
+    }
+    // `restricted` (iOS, control parental...) tampoco se puede resolver
+    // volviendo a pedir el permiso.
+    if (statuses.any((s) => s.isPermanentlyDenied || s.isRestricted)) {
+      return BlePermissionStatus.permanentlyDenied;
+    }
+    return BlePermissionStatus.denied;
+  }
+
+  /// Pide al sistema operativo los permisos necesarios para BLE (mostrando
+  /// los diálogos que hagan falta) y devuelve el resultado.
+  static Future<BlePermissionStatus> requestBluetoothPermissions() async {
+    final permissions = await _requiredPermissions();
+    if (permissions.isEmpty) return BlePermissionStatus.granted;
+    final statuses = await permissions.request();
+    return _combine(statuses.values);
+  }
+
+  /// Comprueba, sin mostrar ningún diálogo, exactamente los mismos permisos
+  /// que pide [requestBluetoothPermissions].
+  ///
+  /// En Android, un permiso que nunca se ha pedido aparece como
+  /// [BlePermissionStatus.denied]; el sistema solo informa de
+  /// `permanentlyDenied` de forma fiable después de haberlo pedido.
+  static Future<BlePermissionStatus> checkPermissions() async {
+    final permissions = await _requiredPermissions();
+    final statuses = <PermissionStatus>[];
+    for (final permission in permissions) {
+      statuses.add(await permission.status);
+    }
+    return _combine(statuses);
   }
 }

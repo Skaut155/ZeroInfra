@@ -24,20 +24,35 @@ Los esquemas se encuentran en la carpeta `protos/meshtastic/` y se dividen en lo
 ## 3. Preparación del Entorno y Cómo Regenerar el Código
 
 ### Requisitos previos
-Para compilar los ficheros `.proto` a clases de Dart, necesitas tener instalado en el sistema el compilador `protobuf-compiler` y el plugin de Dart.
+Para compilar los ficheros `.proto` a clases de Dart, necesitas tener instalado en el sistema el compilador `protobuf-compiler` y el plugin de Dart (`protoc_plugin`, en la versión indicada en la sección 4).
 
-\`\`\`bash
+```bash
 sudo apt install protobuf-compiler
-\`\`\`
+dart pub global activate protoc_plugin 25.1.0
+```
 
 El código Dart para la aplicación móvil se genera automáticamente ejecutando el script en la raíz del proyecto:
-\`\`\`bash
+```bash
 protoc --proto_path=protos --dart_out=app/lib/generated protos/meshtastic/mesh.proto protos/meshtastic/portnums.proto protos/meshtastic/telemetry.proto protos/meshtastic/config.proto protos/meshtastic/module_config.proto protos/meshtastic/channel.proto protos/meshtastic/device_ui.proto protos/meshtastic/xmodem.proto protos/meshtastic/field_metadata.proto protos/meshtastic/atak.proto
-\`\`\`
+```
 *(El código Dart generado en `/app/lib/generated/`).*
 
 Si al ejecutar comandos de Dart/Flutter obtienes un error indicando que no se encuentra el comando `protoc-gen-dart`, asegúrate de añadir la ruta del caché de pub a las variables de entorno de tu terminal (`PATH`):
 
 ```bash
 export PATH="$PATH":"$HOME/.pub-cache/bin"
+```
+
+---
+
+## 4. Versiones
+
+- El código de `app/lib/generated/` está generado con **`protoc_plugin` 25.1.0**.
+- Ese código exige **`package:protobuf` 6.1.0 o superior**. Por eso `app/pubspec.yaml` pasa de `protobuf: ^3.1.0` a `protobuf: ^6.1.0`: con la 3.1.0 el código generado no compila.
+- Si se regenera con otra versión del plugin, hay que ajustar esa dependencia de `pubspec.yaml` a la versión de `protobuf` que pida el plugin.
+
+Para instalar exactamente esa versión del plugin:
+
+```bash
+dart pub global activate protoc_plugin 25.1.0
 ```
