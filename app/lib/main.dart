@@ -1,7 +1,19 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+
+import 'services/mesh_provider.dart';
+import 'views/chat/chat_view.dart';
+import 'views/map/map_view.dart';
+import 'views/sos/sos_view.dart';
+import 'views/nodes/nodes_view.dart';
 
 void main() {
-  runApp(const ZeroInfraApp());
+  runApp(
+    ChangeNotifierProvider(
+      create: (_) => MeshProvider(),
+      child: const ZeroInfraApp(),
+    ),
+  );
 }
 
 class ZeroInfraApp extends StatelessWidget {
@@ -35,17 +47,17 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
   int _currentIndex = 0;
 
   final List<Widget> _screens = const [
-    Center(child: Text('Vista de Chat (Broadcast y P2P)')),
-    Center(child: Text('Vista de Mapa y Nodos Offline')),
-    Center(child: Text('Botón SOS de Emergencia')),
-    Center(child: Text('Gestión y Conexión de Nodos BLE')),
+    ChatView(),
+    MapView(),
+    SosView(),
+    NodesView(),
   ];
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('PTI · Meshtastic Core'),
+        title: const Text('Zero-Infra Meshtastic'),
         centerTitle: true,
       ),
       body: _screens[_currentIndex],
