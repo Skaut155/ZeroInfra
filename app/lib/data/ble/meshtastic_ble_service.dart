@@ -2,7 +2,8 @@
 // Guía: https://meshtastic.org/docs/development/device/client-api/
 
 import 'dart:async';
-import 'package:flutter/foundation.dart' show debugPrint;
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, debugPrint, defaultTargetPlatform, kIsWeb;
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import '../../core/constants/meshtastic_ble.dart';
 
@@ -186,6 +187,24 @@ class MeshtasticBleService {
       });
 
       await device.connect();
+
+      // Android: el firmware de Meshtastic exige un enlace cifrado para
+      // escribir en toRadio. Si el móvil aún no está emparejado, Android
+      // pide el PIN en la primera escritura, y esa escritura caduca a los
+      // 15 s, lo que hacía fallar siempre la primera vinculación. Se fuerza
+      // aquí el emparejamiento, que espera hasta 90 s a que se introduzca el
+      // PIN. Si ya estaba emparejado, vuelve enseguida.
+      if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+        try {
+          await device.createBond();
+        } on FlutterBluePlusException catch (e) {
+          debugPrint('Emparejamiento BLE fallido: $e');
+          throw StateError(
+            'No se completó el emparejamiento con la placa. '
+            'Comprueba el PIN e inténtalo otra vez.',
+          );
+        }
+      }
 
       // Tras conectar, la tabla GATT del periférico está en blanco en la memoria del móvil.
       // Hay que volver a descubrir los servicios después de cada conexión.

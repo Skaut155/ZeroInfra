@@ -31,12 +31,13 @@ Tal como lo implementan `BleMeshTransport`, `MeshtasticBleService` y `Meshtastic
 1. **Permisos:** `BleMeshTransport` pide los permisos de Bluetooth (ver más abajo) antes de cada escaneo o conexión. Si faltan, lanza `MeshPermissionException`.
 2. **Comprobar Bluetooth:** la primera vez se comprueba que el móvil soporta Bluetooth (`StateError` si no). El escaneo espera hasta 5 s a que el adaptador esté encendido (`StateError` «El Bluetooth está apagado» si no). El escaneo filtra por el UUID del servicio y dura como máximo 15 s.
 3. **Conectar:** `device.connect()` de flutter_blue_plus. En Android ya negocia un MTU de 512 por defecto, así que no se llama a `requestMtu`; en iOS lo negocia el sistema.
-4. **Descubrir servicios** y localizar el servicio Meshtastic y sus 3 características (toRadio, fromRadio, fromNum). Si falta alguna, se desconecta y se lanza `StateError`.
-5. **Suscribirse a fromNum** (`setNotifyValue(true)`).
-6. **Pedir la configuración:** el cliente escribe `ToRadio.want_config_id` con un número aleatorio (≥ 100000, porque el firmware reserva algunos valores menores). Estado `configuring`.
-7. **Vaciar fromRadio:** se lee hasta obtener una lectura vacía; cada lectura es un `FromRadio`.
-8. **Esperar `config_complete_id`** con el mismo número, con un tiempo máximo de 30 s (`TimeoutException` si no llega). Entonces el estado pasa a `connected` y se publican nodos y canales.
-9. A partir de ahí, **cada notificación de fromNum** provoca un vaciado de fromRadio. Si llega un aviso mientras se está vaciando, se da una vuelta más al terminar (nunca hay dos lecturas en paralelo).
+4. **Emparejar (solo Android):** `device.createBond()` muestra el diálogo del PIN si el móvil aún no está emparejado y espera hasta 90 s. Sin este paso, el PIN aparecía al escribir en `toRadio`, cuya escritura caduca a los 15 s, y la primera vinculación fallaba. Si ya estaba emparejado, sigue sin esperar.
+5. **Descubrir servicios** y localizar el servicio Meshtastic y sus 3 características (toRadio, fromRadio, fromNum). Si falta alguna, se desconecta y se lanza `StateError`.
+6. **Suscribirse a fromNum** (`setNotifyValue(true)`).
+7. **Pedir la configuración:** el cliente escribe `ToRadio.want_config_id` con un número aleatorio (≥ 100000, porque el firmware reserva algunos valores menores). Estado `configuring`.
+8. **Vaciar fromRadio:** se lee hasta obtener una lectura vacía; cada lectura es un `FromRadio`.
+9. **Esperar `config_complete_id`** con el mismo número, con un tiempo máximo de 30 s (`TimeoutException` si no llega). Entonces el estado pasa a `connected` y se publican nodos y canales.
+10. A partir de ahí, **cada notificación de fromNum** provoca un vaciado de fromRadio. Si llega un aviso mientras se está vaciando, se da una vuelta más al terminar (nunca hay dos lecturas en paralelo).
 
 Si cualquier paso falla, la app desconecta y vuelve a `disconnected`. Al perderse el enlace, los mensajes propios que aún no se habían entregado al nodo (`queued`) pasan a `failed`.
 
@@ -93,5 +94,5 @@ Si un permiso queda denegado de forma permanente, la vista Nodos ofrece abrir lo
 
 ## Pendiente de verificar con la placa
 
-- **Emparejamiento / PIN:** lo gestiona el sistema operativo; no se ha probado aún con las T-Beam.
+- **Emparejamiento / PIN:** probado el 18/11 con una T-Beam. Antes del cambio, la primera vinculación fallaba (ver paso 4). Falta repetir la prueba con un móvil sin emparejar para confirmar la corrección.
 - **UUID:** confirmar con nRF Connect que la placa publica el servicio y las características de la tabla anterior.

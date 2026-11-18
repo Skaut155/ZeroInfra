@@ -12,14 +12,12 @@ Documento de revisión de la rama `rama-SHIQI` (15 y 16 de noviembre). Explica c
 - Se han aplicado las correcciones pendientes de `meshtastic_ble_service.dart` y `permission_service.dart`.
 - El SOS sigue con el formato provisional (`SOS|v1|...` por `ALERT_APP`); el paso a EMG1 queda para cuando el firmware de Cristina esté cerrado (sección 5).
 
-**Estado: nada de esto se ha compilado ni ejecutado.** Se ha revisado a mano contra el código Protobuf generado (`app/lib/generated/`) y contra la API de flutter_blue_plus 1.36.8. Además, la rama no compila por sí sola: `main.dart` y `test/widget_test.dart` importan `services/mesh_provider.dart`, que solo existe en `main`. Hay que fusionar primero (sección 4) y después pasar:
+**Estado: compilado y probado en el ordenador, pendiente de prueba real con la placa.** Tras fusionar `origin/main` en `rama-SHIQI` (sección 4):
 
-```bash
-cd app
-flutter pub get
-flutter analyze
-flutter test
-```
+- `flutter doctor` y `flutter analyze`: sin errores ni warnings. Solo quedan avisos de estilo (`info`) por `withOpacity` en `lib/views/map/map_view.dart`, que es código de Carlos.
+- `flutter test`: pasan los 20 tests (los 14 de la capa de datos y los 6 del códec EMG1 de Carlos).
+
+Los tests usan un nodo simulado (`FakeTransport`, sección 3.12), así que comprueban la lógica del protocolo pero no el Bluetooth ni el firmware. Primera prueba con la placa (18/11, Samsung SM-A346B): conecta, descubre las características, se suscribe a `fromNum` y descarga la configuración del nodo. La primera vinculación fallaba por el emparejamiento con PIN; se ha corregido (sección 3.10). Falta comprobar en pantalla la lista de nodos y el envío y la recepción de mensajes.
 
 ## 2. Mapa de capas y ficheros
 
@@ -36,7 +34,7 @@ Rutas relativas a `app/`. «Nuevo» incluye los ficheros que en la última versi
 | Fichero | Estado | Qué es |
 |---|---|---|
 | `lib/data/mesh_repository.dart` | Nuevo | Contrato `MeshRepository` y excepción `MeshPermissionException`. |
-| `lib/data/meshtastic/meshtastic_client.dart` | Nuevo (antes, esqueleto sin compilar) | `MeshtasticClient`: protocolo `ToRadio`/`FromRadio`, nodos, canales, texto con acuses, SOS. |
+| `lib/data/meshtastic/meshtastic_client.dart` | Nuevo | `MeshtasticClient`: protocolo `ToRadio`/`FromRadio`, nodos, canales, texto con acuses, SOS. |
 | `lib/data/meshtastic/sos_protocol.dart` | Nuevo | `SosPolicy` y `SosCodec`: formato y política del SOS provisional. |
 | `lib/data/ble/mesh_transport.dart` | Nuevo | Interfaz `MeshTransport`: bytes de entrada y salida. |
 | `lib/data/ble/ble_mesh_transport.dart` | Nuevo | `BleMeshTransport`: adapta `MeshtasticBleService` a `MeshTransport` y pide permisos. |
@@ -44,19 +42,20 @@ Rutas relativas a `app/`. «Nuevo» incluye los ficheros que en la última versi
 | `lib/data/fake/fake_mesh_repository.dart` | Nuevo | Malla simulada. |
 | `lib/core/permissions/permission_service.dart` | Modificado | Permisos según plataforma y versión de Android (sección 3.10). |
 | `lib/core/constants/meshtastic_ble.dart` | Modificado | Solo comentarios. |
-| `lib/models/mesh_message.dart`, `mesh_node.dart` | Modificados | Modelos de Carlos ampliados (sección 3.8). |
-| `lib/models/connection_status.dart`, `mesh_channel.dart` | Nuevos (antes vacíos) | Estado de la conexión y canal del nodo. |
+| `lib/models/mesh_message.dart`, `mesh_node.dart` | Modificado | Modelos de Carlos ampliados (sección 3.8). |
+| `lib/models/connection_status.dart`, `mesh_channel.dart` | Nuevo | Estado de la conexión y canal del nodo. |
 | `lib/models/discovered_device.dart` | Nuevo | Resultado del escaneo BLE. |
 | `lib/providers/app_providers.dart` | Nuevo | Registra el repositorio y los cuatro providers. |
-| `lib/providers/{connection,nodes,chat}_provider.dart` | Nuevos (antes vacíos) | Estado de las vistas Nodos, Mapa y Chat. |
+| `lib/providers/{connection,nodes,chat}_provider.dart` | Nuevo | Estado de las vistas Nodos, Mapa y Chat. |
 | `lib/providers/sos_provider.dart` | Nuevo | Estado de la vista SOS. |
 | `lib/views/nodes/nodes_view.dart` | Modificado | Pestaña Nodos conectada a los providers (escaneo, conexión, lista de nodos). |
 | `lib/main.dart` | Modificado | Envuelve la app en `AppProviders`, por fuera del `MeshProvider` de Carlos. |
+| `lib/generated/meshtastic/atak.pbenum.dart` | Nuevo | Enums `Team` y `MemberRole` que importa `module_config.pb.dart` (sección 3.11). |
 | `pubspec.yaml` | Modificado | `protobuf` ^6.1.0 y `device_info_plus` ^11.0.0. |
 | `android/app/src/main/AndroidManifest.xml` | Modificado | `BLUETOOTH` y `BLUETOOTH_ADMIN` limitados a `maxSdkVersion="30"`. |
 | `.gitignore` | Modificado | Ignora `/android/build/`. |
-| `test/data/meshtastic_client_test.dart`, `sos_protocol_test.dart` | Nuevos | Tests del cliente y del códec SOS. |
-| `test/widget_test.dart` | Nuevo (antes vacío) | La app arranca con la malla simulada. |
+| `test/data/meshtastic_client_test.dart`, `sos_protocol_test.dart` | Nuevo | Tests del cliente y del códec SOS. |
+| `test/widget_test.dart` | Nuevo | La app arranca con la malla simulada. |
 
 ## 3. Pieza por pieza
 
@@ -243,12 +242,16 @@ Comparación con la versión `9554d6c`.
 
 En el manifiesto, `BLUETOOTH` y `BLUETOOTH_ADMIN` llevan ahora `maxSdkVersion="30"`: solo hacen falta hasta Android 11.
 
+**Emparejamiento con PIN (añadido el 18/11, tras la primera prueba con la placa).** En el primer intento de cada móvil la vinculación fallaba y el segundo funcionaba. El firmware de Meshtastic exige un enlace cifrado para escribir en `toRadio`. Como el móvil no estaba emparejado, Android lanzaba el diálogo del PIN al escribir `want_config_id`, y esa escritura caduca a los 15 s (límite de `write()` en flutter_blue_plus): si el PIN tardaba más, la conexión se abortaba y el emparejamiento terminaba justo después. Ahora `connect()` llama a `device.createBond()` en Android justo después de conectar, antes de cualquier escritura. Esa llamada espera hasta 90 s al PIN y vuelve enseguida si el móvil ya estaba emparejado. Si el usuario cancela o el PIN es incorrecto, se lanza un `StateError` con un mensaje para la pantalla de Nodos.
+
 ### 3.11 `pubspec.yaml`
 
 - `protobuf: ^6.1.0` (antes ^3.1.0). El código de `lib/generated/` sale de `protoc_plugin` 25.1.0, que exige `package:protobuf` 6.1.0 o superior; con la 3.1.0 no compila (ver `docs/PROTOBUF.md`).
 - `device_info_plus: ^11.0.0`, para leer la versión de Android en `PermissionService`.
 
 El `pubspec.lock` de `main` (subido por Carlos) fija `protobuf` 3.1.0 y no tiene `device_info_plus`. `flutter pub get` tras la fusión lo actualizará; hay que confirmar ese cambio.
+
+**`atak.pbenum.dart`.** `module_config.pb.dart` importa `atak.pbenum.dart`, que no se había generado aunque `protos/meshtastic/atak.proto` sí estaba en el repositorio. `flutter analyze` no lo detectaba porque `analysis_options.yaml` excluye `lib/generated/`; los tests no compilaban. Se ha añadido una versión parcial escrita a mano, con el formato de `protoc_plugin` 25.1.0, que solo contiene los dos enums que se usan (`Team` y `MemberRole`). Al regenerar con el comando de `docs/PROTOBUF.md` se sustituye por la completa.
 
 ### 3.12 Tests
 
@@ -303,7 +306,7 @@ cd app && flutter pub get && flutter analyze && flutter test
 
 - La fusión da conflicto de texto en `app/lib/main.dart` y `app/lib/models/mesh_message.dart`. La versión de `rama-SHIQI` de ambos ya incluye lo de Carlos (su `MeshProvider` en `main.dart`; sus campos y estados en `MeshMessage`), así que se resuelven quedándose con la propia: durante un `merge`, `--ours` es la rama en la que se está.
 - `pubspec.yaml` se fusiona solo.
-- **Hasta hacer la fusión, `rama-SHIQI` no compila**: `main.dart` y `test/widget_test.dart` importan `services/mesh_provider.dart`, que solo existe en `main`.
+- La fusión ya está hecha en `rama-SHIQI`. Antes de ella la rama no compilaba sola, porque `main.dart` y `test/widget_test.dart` importan `services/mesh_provider.dart`, que solo existía en `main`. Falta llevar `rama-SHIQI` a `main` con una pull request.
 - Tras `flutter pub get`, confirmar también el `pubspec.lock` actualizado (sección 3.11).
 
 ### Qué tiene que hacer Carlos para que su chat use datos reales
@@ -381,7 +384,7 @@ Su firmware (Meshtastic 2.8.2 modificado) no es definitivo: las pruebas están p
 
 ## 6. Limitaciones y pendiente
 
-- **Sin compilar ni ejecutar**; la rama no compila hasta fusionar con `main`.
+- **Prueba con la placa a medias:** la conexión y la descarga de la configuración funcionan; falta comprobar la lista de nodos, los mensajes y la corrección del emparejamiento.
 - Solo la pestaña Nodos usa datos reales; chat, mapa y SOS siguen con datos simulados o locales.
 - **Sin persistencia:** historial y nodos viven en memoria.
 - **Sin reconexión automática:** tras perder el enlace hay que volver a vincular.
