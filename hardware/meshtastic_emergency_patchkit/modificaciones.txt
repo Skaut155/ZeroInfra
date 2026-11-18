@@ -1,0 +1,363 @@
+diff --git a/platformio.ini b/platformio.ini
+index f4a3df28c..65061c400 100644
+--- a/platformio.ini
++++ b/platformio.ini
+@@ -2,7 +2,7 @@
+ ; https://docs.platformio.org/page/projectconf.html
+ 
+ [platformio]
+-default_envs = heltec-v3
++default_envs = tbeam
+ 
+ extra_configs =
+ 	variants/*/*.ini
+@@ -273,3 +273,25 @@ lib_deps =
+ 	https://github.com/adafruit/Adafruit_DS248x/archive/refs/tags/1.2.0.zip
+ 	# renovate: datasource=github-tags depName=Adafruit_BME680 packageName=adafruit/Adafruit_BME680
+ 	https://github.com/adafruit/Adafruit_BME680/archive/refs/tags/2.0.6.zip
++
++; EXPERIMENTAL: isolated environment, keeps existing T-Beam settings.
++[env:tbeam-emergency]
++extends = env:tbeam
++build_flags =
++  ${env:tbeam.build_flags}
++  -DEMERGENCY_METRICS=1
++  -DEMERGENCY_ENABLE_MODULE=1
++  -DEMERGENCY_APP_PRIORITY=1
++  -DEMERGENCY_QUEUE_AGING=0
++  -DMESHTASTIC_EXCLUDE_MQTT=1
++
++; Isolate the experimental aging algorithm from the reliable baseline.
++[env:tbeam-emergency-aging]
++extends = env:tbeam
++build_flags =
++  ${env:tbeam.build_flags}
++  -DEMERGENCY_METRICS=1
++  -DEMERGENCY_ENABLE_MODULE=1
++  -DEMERGENCY_APP_PRIORITY=1
++  -DEMERGENCY_QUEUE_AGING=1
++  -DMESHTASTIC_EXCLUDE_MQTT=1
+diff --git a/src/mesh/MeshPacketQueue.cpp b/src/mesh/MeshPacketQueue.cpp
+index 58e9cf0bf..5235f3363 100644
+--- a/src/mesh/MeshPacketQueue.cpp
++++ b/src/mesh/MeshPacketQueue.cpp
+@@ -1,4 +1,5 @@
+ #include "MeshPacketQueue.h"
++#include "EmergencyQueuePolicy.h"
+ #include "NodeDB.h"
+ #include "Throttle.h"
+ #include "UptimeClock.h"
+@@ -30,7 +31,30 @@ bool CompareMeshPacketFunc(const meshtastic_MeshPacket *p1, const meshtastic_Mes
+     return (p1p != p2p) ? (p1p > p2p) : (!isFromUs(p1) && isFromUs(p2));
+ }
+ 
+-MeshPacketQueue::MeshPacketQueue(size_t _maxLen) : maxLen(_maxLen) {}
++MeshPacketQueue::MeshPacketQueue(size_t _maxLen) : maxLen(_maxLen)
++{
++    queue.reserve(maxLen);
++    queuedAt.reserve(maxLen);
++}
++
++size_t MeshPacketQueue::bestReadyIndex() const
++{
++    if (queue.empty()) return 0;
++#if EMERGENCY_QUEUE_AGING
++    // Delayed relays keep the original semantics and stay behind ready packets.
++    if (queue.front()->tx_after) return 0;
++    const uint32_t now = Time::getMillis();
++    size_t best = 0;
++    uint32_t high = EmergencyQueuePolicy::effective(queue[0]->priority, uint32_t(now - queuedAt[0]));
++    for (size_t i = 1; i < queue.size() && !queue[i]->tx_after; ++i) {
++        const uint32_t candidate = EmergencyQueuePolicy::effective(queue[i]->priority, uint32_t(now - queuedAt[i]));
++        if (candidate > high) { high = candidate; best = i; }
++    }
++    return best;
++#else
++    return 0;
++#endif
++}
+ 
+ bool MeshPacketQueue::empty()
+ {
+@@ -69,9 +93,12 @@ void fixPriority(meshtastic_MeshPacket *p)
+ /** enqueue a packet, return false if full */
+ bool MeshPacketQueue::enqueue(meshtastic_MeshPacket *p, bool *dropped)
+ {
++    fixPriority(p);
+     // no space - try to replace a lower priority packet in the queue
+     if (queue.size() >= maxLen) {
+         bool replaced = replaceLowerPriorityPacket(p);
++        if (replaced) ++emergencyStats.evicted;
++        else ++emergencyStats.rejected;
+         if (!replaced) {
+             LOG_WARN("TX queue is full, and there is no lower-priority packet available to evict in favour of 0x%08x", p->id);
+         }
+@@ -87,7 +114,11 @@ bool MeshPacketQueue::enqueue(meshtastic_MeshPacket *p, bool *dropped)
+ 
+     // Find the correct position using upper_bound to maintain a stable order
+     auto it = std::upper_bound(queue.begin(), queue.end(), p, CompareMeshPacketFunc);
+-    queue.insert(it, p); // Insert packet at the found position
++    const size_t pos = size_t(it - queue.begin());
++    queue.insert(it, p); // keep the current Meshtastic sort rules
++    queuedAt.insert(queuedAt.begin() + pos, Time::getMillis());
++    ++emergencyStats.accepted;
++    if (queue.size() > emergencyStats.peakSize) emergencyStats.peakSize = uint32_t(queue.size());
+     return true;
+ }
+ 
+@@ -97,8 +128,14 @@ meshtastic_MeshPacket *MeshPacketQueue::dequeue()
+         return NULL;
+     }
+ 
+-    auto *p = queue.front();
+-    queue.erase(queue.begin()); // Remove the highest-priority packet
++    const size_t i = bestReadyIndex();
++    auto *p = queue[i];
++    const uint32_t wait = uint32_t(Time::getMillis() - queuedAt[i]);
++    ++emergencyStats.dequeued;
++    emergencyStats.totalWaitMs += wait;
++    if (wait > emergencyStats.maxWaitMs) emergencyStats.maxWaitMs = wait;
++    queuedAt.erase(queuedAt.begin() + i);
++    queue.erase(queue.begin() + i);
+     return p;
+ }
+ 
+@@ -108,8 +145,7 @@ meshtastic_MeshPacket *MeshPacketQueue::getFront()
+         return NULL;
+     }
+ 
+-    auto *p = queue.front();
+-    return p;
++    return queue[bestReadyIndex()];
+ }
+ 
+ /** Get a packet from this queue. Returns a pointer to the packet, or NULL if not found. */
+@@ -132,7 +168,10 @@ meshtastic_MeshPacket *MeshPacketQueue::remove(NodeNum from, PacketId id, bool t
+         auto p = (*it);
+         if (getFrom(p) == from && p->id == id && ((tx_normal && !p->tx_after) || (tx_late && p->tx_after)) &&
+             (!hop_limit_lt || p->hop_limit < hop_limit_lt)) {
++            const size_t pos = size_t(it - queue.begin());
++            queuedAt.erase(queuedAt.begin() + pos);
+             queue.erase(it);
++            ++emergencyStats.canceled;
+             return p;
+         }
+     }
+@@ -163,6 +202,7 @@ bool MeshPacketQueue::replaceLowerPriorityPacket(meshtastic_MeshPacket *p)
+         LOG_WARN("Dropping packet 0x%08x to make room in the TX queue for higher-priority packet 0x%08x", backPacket->id, p->id);
+         // Remove the back packet
+         queue.pop_back();
++        queuedAt.pop_back();
+         packetPool.release(backPacket);
+         // Insert the new packet in the correct order
+         enqueue(p);
+@@ -178,6 +218,7 @@ bool MeshPacketQueue::replaceLowerPriorityPacket(meshtastic_MeshPacket *p)
+         if (!refPacket->tx_after && refPacket->priority < p->priority) {
+             LOG_WARN("Dropping non-late packet 0x%08x to make room in the TX queue for higher-priority packet 0x%08x",
+                      refPacket->id, p->id);
++            queuedAt.erase(queuedAt.begin() + (it - queue.begin()));
+             queue.erase(it);
+             packetPool.release(refPacket);
+             // Insert the new packet in the correct order
+@@ -207,6 +248,7 @@ bool MeshPacketQueue::replaceLowerPriorityPacket(meshtastic_MeshPacket *p)
+                          backPacket->id, dt, p->id);
+             }
+             queue.pop_back();
++            queuedAt.pop_back();
+             packetPool.release(backPacket);
+             // Insert the new packet in the correct order
+             enqueue(p);
+diff --git a/src/mesh/MeshPacketQueue.h b/src/mesh/MeshPacketQueue.h
+index 3d3902c1e..f9627ac15 100644
+--- a/src/mesh/MeshPacketQueue.h
++++ b/src/mesh/MeshPacketQueue.h
+@@ -3,14 +3,25 @@
+ #include "MeshTypes.h"
+ 
+ #include <queue>
++#include <vector>
++#include <stdint.h>
+ 
+ /**
+  * A priority queue of packets
+  */
++struct EmergencyQueueStats {
++    uint32_t accepted = 0, evicted = 0, rejected = 0, canceled = 0, dequeued = 0;
++    uint32_t peakSize = 0, maxWaitMs = 0;
++    uint64_t totalWaitMs = 0;
++};
++
+ class MeshPacketQueue
+ {
+     size_t maxLen;
+     std::vector<meshtastic_MeshPacket *> queue;
++    std::vector<uint32_t> queuedAt; // parallel to queue, enqueue timestamp, monotonic ms
++    EmergencyQueueStats emergencyStats;
++    size_t bestReadyIndex() const;
+ 
+     /** Replace a lower priority package in the queue with 'mp' (provided there are lower pri packages). Return true if replaced.
+      */
+@@ -18,6 +29,7 @@ class MeshPacketQueue
+ 
+   public:
+     explicit MeshPacketQueue(size_t _maxLen);
++    EmergencyQueueStats getEmergencyStats() const { return emergencyStats; }
+ 
+     /** enqueue a packet, return false if full
+      * @param dropped Optional pointer to a bool that will be set to true if a packet was dropped
+diff --git a/src/mesh/RadioLibInterface.cpp b/src/mesh/RadioLibInterface.cpp
+index 7ca6590eb..68d313d03 100644
+--- a/src/mesh/RadioLibInterface.cpp
++++ b/src/mesh/RadioLibInterface.cpp
+@@ -588,12 +588,14 @@ void RadioLibInterface::onNotify(uint32_t notification)
+                     const bool channelActive = isChannelActive();
+                     scanForTx = nullptr;
+                     if (channelActive) { // currently traffic on the channel?
++                        ++emergencyCadBusy;
+                         LOG_DEBUG("CAD busy");
+                         // Beacon target or not: reconfigureForBeaconTX() already left RX running on that
+                         // config, so skipping this only ever left the node deaf in standby.
+                         rearmReceive();
+                         setTransmitDelay();
+                     } else {
++                        ++emergencyCadFree;
+                         LOG_DEBUG("CAD free");
+                         // Send any outgoing packets we have ready as fast as possible to keep the time between channel scan and
+                         // actual transmission as short as possible
+@@ -1066,6 +1068,14 @@ void RadioLibInterface::checkStaleRxFlags()
+ 
+ void RadioLibInterface::periodicRadioMaintenance()
+ {
++#if EMERGENCY_METRICS
++    const auto emg = txQueue.getEmergencyStats();
++    LOG_INFO("EMG_TXQ,accepted=%lu,evicted=%lu,rejected=%lu,canceled=%lu,dequeued=%lu,peak=%lu,wait_max_ms=%lu,wait_avg_ms=%lu,tx_started=%lu,cad_busy=%lu,cad_free=%lu",
++             (unsigned long)emg.accepted, (unsigned long)emg.evicted, (unsigned long)emg.rejected,
++             (unsigned long)emg.canceled, (unsigned long)emg.dequeued, (unsigned long)emg.peakSize,
++             (unsigned long)emg.maxWaitMs, (unsigned long)(emg.dequeued ? emg.totalWaitMs / emg.dequeued : 0U),
++             (unsigned long)emergencyTxStarted, (unsigned long)emergencyCadBusy, (unsigned long)emergencyCadFree);
++#endif
+     // Every startReceive() call site is event-driven (RX/TX ISR, the CAD-busy branch, reconfigure), and a
+     // radio left with RX off can no longer raise an RX interrupt - on a node with nothing to transmit
+     // nothing would ever re-arm it. This periodic tick is that retry; maybeRecoverChipStateLoss() throttles.
+@@ -1410,6 +1420,7 @@ bool RadioLibInterface::startSend(meshtastic_MeshPacket *txp)
+             // bits
+             enableInterrupt(isrTxLevel0);
+             // unset-sentinel-ok: busyTx/sendingPacket is the armed flag, so 0 is a legal stamp
++            ++emergencyTxStarted;
+             lastTxStart = Time::getMillis();
+             printPacket("Started Tx", txp);
+ #ifdef LED_LORA
+diff --git a/src/mesh/RadioLibInterface.h b/src/mesh/RadioLibInterface.h
+index c534f8fa3..a361bce91 100644
+--- a/src/mesh/RadioLibInterface.h
++++ b/src/mesh/RadioLibInterface.h
+@@ -93,6 +93,9 @@ class STM32WLx_ModuleWrapper : public STM32WLx_Module
+ class RadioLibInterface : public RadioInterface, protected concurrency::NotifiedWorkerThread
+ {
+     MeshPacketQueue txQueue = MeshPacketQueue(MAX_TX_QUEUE);
++    uint32_t emergencyCadBusy = 0;
++    uint32_t emergencyCadFree = 0;
++    uint32_t emergencyTxStarted = 0;
+ 
+   protected:
+     /// Used as our notification from the ISR
+diff --git a/src/mesh/ReliableRouter.cpp b/src/mesh/ReliableRouter.cpp
+index f2c71bb78..34a924df8 100644
+--- a/src/mesh/ReliableRouter.cpp
++++ b/src/mesh/ReliableRouter.cpp
+@@ -1,4 +1,9 @@
+ #include "ReliableRouter.h"
++#if EMERGENCY_METRICS
++static uint32_t emergencyReliableStarts = 0;
++static uint32_t emergencyAckEvents = 0;
++static uint32_t emergencyNakEvents = 0;
++#endif
+ #include "AckProof.h"
+ #include "Default.h"
+ #include "MeshTypes.h"
+@@ -28,6 +33,12 @@ ErrorCode ReliableRouter::send(meshtastic_MeshPacket *p)
+     const bool retransmitting = p->want_ack;
+ 
+     if (p->want_ack) {
++#if EMERGENCY_METRICS
++        ++emergencyReliableStarts;
++        if ((emergencyReliableStarts % 64U) == 1U)
++            LOG_INFO("EMG_RELIABLE,starts=%lu,acks=%lu,naks=%lu", (unsigned long)emergencyReliableStarts,
++                     (unsigned long)emergencyAckEvents, (unsigned long)emergencyNakEvents);
++#endif
+         DEBUG_HEAP_BEFORE;
+         auto copy = packetPool.allocCopy(*p);
+         DEBUG_HEAP_AFTER("ReliableRouter::send", copy);
+@@ -177,6 +188,10 @@ void ReliableRouter::sniffReceived(const meshtastic_MeshPacket *p, const meshtas
+         if ((ackId || nakId) && ackProofPermitsAction(p, ackId ? ackId : nakId, ackId != 0) &&
+             // Implicit ACKs from MQTT should not stop retransmissions
+             !(isFromUs(p) && p->transport_mechanism == meshtastic_MeshPacket_TransportMechanism_TRANSPORT_MQTT)) {
++#if EMERGENCY_METRICS
++            if (ackId) ++emergencyAckEvents;
++            else ++emergencyNakEvents;
++#endif
+             LOG_DEBUG("Received a %s for 0x%08x, stopping retransmissions", ackId ? "ACK" : "NAK", ackId);
+             if (ackId) {
+                 stopRetransmission(p->to, ackId);
+diff --git a/src/mesh/Router.cpp b/src/mesh/Router.cpp
+index 6e14ae258..877d9ab40 100644
+--- a/src/mesh/Router.cpp
++++ b/src/mesh/Router.cpp
+@@ -1,4 +1,7 @@
+ #include "Router.h"
++#if EMERGENCY_APP_PRIORITY
++#include "modules/optional/Emergency/EmergencyWire.h"
++#endif
+ #include "AdminKeys.h"
+ #include "Channels.h"
+ #include "CryptoEngine.h"
+@@ -319,15 +322,30 @@ int32_t Router::runOnce()
+  */
+ void Router::enqueueReceivedMessage(meshtastic_MeshPacket *p)
+ {
++#if EMERGENCY_METRICS
++    static uint32_t emergencyRxEvictions = 0;
++    static uint32_t emergencyRxAccepted = 0;
++#endif
+     // Try enqueue until successful
+     while (!fromRadioQueue.enqueue(p, 0)) {
+         meshtastic_MeshPacket *old_p;
+         old_p = fromRadioQueue.dequeuePtr(0); // Dequeue and discard the oldest packet
+         if (old_p) {
++#if EMERGENCY_METRICS
++            ++emergencyRxEvictions;
++            if ((emergencyRxEvictions % 16U) == 1U)
++                LOG_WARN("EMG_RXQ,drop_oldest_total=%lu", (unsigned long)emergencyRxEvictions);
++#endif
+             printPacket("fromRadioQ full, drop oldest!", old_p);
+             packetPool.release(old_p);
+         }
+     }
++#if EMERGENCY_METRICS
++    ++emergencyRxAccepted;
++    if ((emergencyRxAccepted % 128U) == 1U)
++        LOG_INFO("EMG_RXQ,accepted=%lu,evicted=%lu", (unsigned long)emergencyRxAccepted,
++                 (unsigned long)emergencyRxEvictions);
++#endif
+     // Nasty hack because our threading is primitive.  interfaces shouldn't need to know about routers FIXME
+     setReceivedMessage();
+ }
+@@ -440,6 +458,18 @@ ErrorCode Router::sendLocal(meshtastic_MeshPacket *p, RxSource src)
+         // Coordinates never go out on the event channel: any local originator (phone, module, UI) that aimed
+         // one there is moved onto the position channel instead. Before the loopback below so the local copy
+         // carries the channel it will actually be sent on.
++#if EMERGENCY_APP_PRIORITY
++        // Priority remains local to the node. No on-air header changes and no relay priority inference.
++        // A valid custom payload from this node is identified as an emergency alert.
++        if (isFromUs(p) && p->which_payload_variant == meshtastic_MeshPacket_decoded_tag &&
++            p->decoded.portnum == meshtastic_PortNum_PRIVATE_APP) {
++            EmergencyWire::Message e = {};
++            if (EmergencyWire::parse(p->decoded.payload.bytes, p->decoded.payload.size, e) &&
++                e.kind == EmergencyWire::Kind::Alert && e.originNode == getNodeNum()) {
++                p->priority = meshtastic_MeshPacket_Priority_ALERT;
++            }
++        }
++#endif
+         coerceCoordinatePacketToPositionChannel(p);
+ 
+         // If we are sending a broadcast, we also treat it as if we just received it ourself
