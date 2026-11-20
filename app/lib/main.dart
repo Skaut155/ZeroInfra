@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import 'providers/app_providers.dart';
 import 'services/mesh_provider.dart';
 import 'views/chat/chat_view.dart';
 import 'views/map/map_view.dart';
@@ -9,9 +10,13 @@ import 'views/nodes/nodes_view.dart';
 
 void main() {
   runApp(
-    ChangeNotifierProvider(
-      create: (_) => MeshProvider(),
-      child: const ZeroInfraApp(),
+    // AppProviders registra la capa de datos real (BLE y Meshtastic);
+    // MeshProvider es el estado simulado de Carlos, que hoy usa el chat.
+    AppProviders(
+      child: ChangeNotifierProvider(
+        create: (_) => MeshProvider(),
+        child: const ZeroInfraApp(),
+      ),
     ),
   );
 }
