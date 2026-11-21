@@ -3,7 +3,10 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_map_cache/flutter_map_cache.dart';
 import 'package:dio_cache_interceptor_file_store/dio_cache_interceptor_file_store.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:provider/provider.dart';
 
+import '../../models/mesh_node.dart';
+import '../../providers/nodes_provider.dart';
 import '../../services/map/map_cache_service.dart';
 
 class MapView extends StatefulWidget {
@@ -178,69 +181,19 @@ class _MapViewState extends State<MapView> {
     }
   }
 
-  // Nodos simulados en el mapa mientras se conectan las tramas GPS de LoRa
-  final List<Map<String, dynamic>> _mockNodes = [
-    {
-      'name': 'Mi Nodo (ESP32)',
-      'position': LatLng(41.38879, 2.11296),
-      'type': 'self',
-      'battery': 88,
-      'snr': '8.5 dB',
-    },
-    {
-      'name': 'Gateway MQTT (Vertex)',
-      'position': LatLng(41.38980, 2.11450),
-      'type': 'gateway',
-      'battery': 100,
-      'snr': '11.2 dB',
-    },
-    {
-      'name': 'Repetidor Malla (A5)',
-      'position': LatLng(41.38720, 2.11180),
-      'type': 'repeater',
-      'battery': 64,
-      'snr': '4.1 dB',
-    },
-    {
-      'name': 'Alerta SOS Activa',
-      'position': LatLng(41.38650, 2.11520),
-      'type': 'sos',
-      'battery': 42,
-      'snr': '-2.3 dB',
-    },
-  ];
-
-  Color _getNodeColor(String type) {
-    switch (type) {
-      case 'self':
-        return Colors.blueAccent;
-      case 'gateway':
-        return Colors.purpleAccent;
-      case 'repeater':
-        return Colors.greenAccent;
-      case 'sos':
-        return Colors.redAccent;
-      default:
-        return Colors.orangeAccent;
-    }
+  Color _getNodeColor(MeshNode node) {
+    if (node.isEmergency) return Colors.redAccent;
+    if (node.isMe) return Colors.blueAccent;
+    return Colors.orangeAccent;
   }
 
-  IconData _getNodeIcon(String type) {
-    switch (type) {
-      case 'self':
-        return Icons.my_location;
-      case 'gateway':
-        return Icons.router;
-      case 'repeater':
-        return Icons.cell_tower;
-      case 'sos':
-        return Icons.warning;
-      default:
-        return Icons.radio;
-    }
+  IconData _getNodeIcon(MeshNode node) {
+    if (node.isEmergency) return Icons.warning;
+    if (node.isMe) return Icons.my_location;
+    return Icons.radio;
   }
 
-  void _showNodeDetails(Map<String, dynamic> node) {
+  void _showNodeDetails(MeshNode node) {
     showModalBottomSheet(
       context: context,
       shape: const RoundedRectangleBorder(
@@ -256,12 +209,8 @@ class _MapViewState extends State<MapView> {
               Row(
                 children: [
                   CircleAvatar(
-                    backgroundColor: _getNodeColor(node['type'])
-                        .withOpacity(0.2),
-                    child: Icon(
-                      _getNodeIcon(node['type']),
-                      color: _getNodeColor(node['type']),
-                    ),
+                    backgroundColor: _getNodeColor(node).withValues(alpha: 0.2),
+                    child: Icon(_getNodeIcon(node), color: _getNodeColor(node)),
                   ),
                   const SizedBox(width: 12),
                   Expanded(
@@ -269,14 +218,18 @@ class _MapViewState extends State<MapView> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          node['name'],
+                          node.name,
                           style: const TextStyle(
                             fontSize: 18,
                             fontWeight: FontWeight.bold,
                           ),
                         ),
                         Text(
-                          'Tipo: ${node['type'].toString().toUpperCase()}',
+                          node.isMe
+                              ? 'Nodo propio'
+                              : (node.isEmergency
+                                    ? 'Alerta SOS activa'
+                                    : 'Nodo de la malla'),
                           style: TextStyle(
                             color: Colors.grey[400],
                             fontSize: 12,
@@ -285,7 +238,7 @@ class _MapViewState extends State<MapView> {
                       ],
                     ),
                   ),
-                  if (node['type'] == 'sos')
+                  if (node.isEmergency)
                     const Chip(
                       label: Text(
                         'EMERGENCIA',
@@ -296,35 +249,39 @@ class _MapViewState extends State<MapView> {
                 ],
               ),
               const Divider(height: 24),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceAround,
+              Wrap(
+                alignment: WrapAlignment.spaceAround,
+                spacing: 20,
+                runSpacing: 12,
                 children: [
-                  Column(
-                    children: [
-                      const Text(
-                        'Batería',
-                        style: TextStyle(color: Colors.grey, fontSize: 12),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        '${node['battery']}%',
-                        style: const TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                    ],
-                  ),
-                  Column(
-                    children: [
-                      const Text(
-                        'Señal SNR',
-                        style: TextStyle(color: Colors.grey, fontSize: 12),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        '${node['snr']}',
-                        style: const TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                    ],
-                  ),
+                  if (node.hasBattery)
+                    Column(
+                      children: [
+                        const Text(
+                          'Batería',
+                          style: TextStyle(color: Colors.grey, fontSize: 12),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          '${node.batteryLevel}%',
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                      ],
+                    ),
+                  if (node.snr != 0)
+                    Column(
+                      children: [
+                        const Text(
+                          'Señal SNR',
+                          style: TextStyle(color: Colors.grey, fontSize: 12),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          '${node.snr.toStringAsFixed(1)} dB',
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                      ],
+                    ),
                   Column(
                     children: [
                       const Text(
@@ -333,11 +290,40 @@ class _MapViewState extends State<MapView> {
                       ),
                       const SizedBox(height: 4),
                       Text(
-                        '${(node['position'] as LatLng).latitude.toStringAsFixed(4)}, ${(node['position'] as LatLng).longitude.toStringAsFixed(4)}',
+                        '${node.latitude.toStringAsFixed(4)}, ${node.longitude.toStringAsFixed(4)}',
                         style: const TextStyle(
                           fontWeight: FontWeight.bold,
                           fontSize: 11,
                         ),
+                      ),
+                    ],
+                  ),
+                  if (node.hopsAway != null)
+                    Column(
+                      children: [
+                        const Text(
+                          'Saltos',
+                          style: TextStyle(color: Colors.grey, fontSize: 12),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          '${node.hopsAway}',
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                      ],
+                    ),
+                  Column(
+                    children: [
+                      const Text(
+                        'Última escucha',
+                        style: TextStyle(color: Colors.grey, fontSize: 12),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        node.lastHeard == MeshNode.neverHeard
+                            ? 'Nunca oído'
+                            : '${node.lastHeard.hour.toString().padLeft(2, '0')}:${node.lastHeard.minute.toString().padLeft(2, '0')}',
+                        style: const TextStyle(fontWeight: FontWeight.bold),
                       ),
                     ],
                   ),
@@ -356,6 +342,8 @@ class _MapViewState extends State<MapView> {
     if (_cacheStorePath == null) {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
+    final nodesProvider = context.watch<NodesProvider>();
+    final positionedNodes = nodesProvider.withPosition;
 
     return Scaffold(
       body: Stack(
@@ -378,9 +366,10 @@ class _MapViewState extends State<MapView> {
                 ),
               ),
               MarkerLayer(
-                markers: _mockNodes.map((node) {
-                  final position = node['position'] as LatLng;
-                  final type = node['type'] as String;
+                markers: positionedNodes.map((node) {
+                  final position = LatLng(node.latitude, node.longitude);
+                  final color = _getNodeColor(node);
+                  final isEmergency = node.isEmergency;
                   return Marker(
                     point: position,
                     width: 50,
@@ -390,18 +379,18 @@ class _MapViewState extends State<MapView> {
                       child: AnimatedContainer(
                         duration: const Duration(milliseconds: 300),
                         decoration: BoxDecoration(
-                          color: _getNodeColor(type),
+                          color: color,
                           shape: BoxShape.circle,
                           boxShadow: [
                             BoxShadow(
-                              color: _getNodeColor(type).withOpacity(0.5),
-                              blurRadius: type == 'sos' ? 12 : 6,
-                              spreadRadius: type == 'sos' ? 4 : 1,
+                              color: color.withValues(alpha: 0.5),
+                              blurRadius: isEmergency ? 12 : 6,
+                              spreadRadius: isEmergency ? 4 : 1,
                             ),
                           ],
                         ),
                         child: Icon(
-                          _getNodeIcon(type),
+                          _getNodeIcon(node),
                           color: Colors.black87,
                           size: 26,
                         ),
@@ -419,7 +408,7 @@ class _MapViewState extends State<MapView> {
             left: 16,
             right: 16,
             child: Card(
-              color: Theme.of(context).cardColor.withOpacity(0.92),
+              color: Theme.of(context).cardColor.withValues(alpha: 0.92),
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(10),
               ),
@@ -432,9 +421,9 @@ class _MapViewState extends State<MapView> {
                   children: [
                     const Icon(Icons.hub, color: Colors.deepOrange, size: 20),
                     const SizedBox(width: 8),
-                    const Expanded(
+                    Expanded(
                       child: Text(
-                        'Red LoRa: 4 nodos visibles',
+                        'Red LoRa: ${positionedNodes.length} nodos visibles',
                         style: TextStyle(
                           fontWeight: FontWeight.w600,
                           fontSize: 13,
@@ -471,7 +460,7 @@ class _MapViewState extends State<MapView> {
                         vertical: 4,
                       ),
                       decoration: BoxDecoration(
-                        color: Colors.green.withOpacity(0.2),
+                        color: Colors.green.withValues(alpha: 0.2),
                         borderRadius: BorderRadius.circular(6),
                       ),
                       child: const Text(
@@ -512,7 +501,7 @@ class _MapViewState extends State<MapView> {
                   heroTag: 'btn_zoom_in',
                   tooltip: 'Acercar mapa',
                   backgroundColor: Theme.of(context).cardColor
-                      .withOpacity(0.95),
+                      .withValues(alpha: 0.95),
                   onPressed: _zoomIn,
                   child: const Icon(Icons.add, color: Colors.white),
                 ),
@@ -521,7 +510,7 @@ class _MapViewState extends State<MapView> {
                   heroTag: 'btn_zoom_out',
                   tooltip: 'Alejar mapa',
                   backgroundColor: Theme.of(context).cardColor
-                      .withOpacity(0.95),
+                      .withValues(alpha: 0.95),
                   onPressed: _zoomOut,
                   child: const Icon(Icons.remove, color: Colors.white),
                 ),
@@ -530,7 +519,17 @@ class _MapViewState extends State<MapView> {
                   heroTag: 'btn_recenter',
                   tooltip: 'Centrar en Campus Nord',
                   backgroundColor: Theme.of(context).colorScheme.primary,
-                  onPressed: () => _mapController.move(_myLocation, 16.0),
+                  onPressed: () {
+                    final me = nodesProvider.me;
+                    if (me != null && me.hasPosition) {
+                      _mapController.move(
+                        LatLng(me.latitude, me.longitude),
+                        16.0,
+                      );
+                    } else {
+                      _mapController.move(_myLocation, 16.0);
+                    }
+                  },
                   child: const Icon(Icons.my_location, color: Colors.white),
                 ),
               ],

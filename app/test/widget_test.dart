@@ -1,9 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:provider/provider.dart';
 import 'package:zeroinfra/data/fake/fake_mesh_repository.dart';
 import 'package:zeroinfra/main.dart';
 import 'package:zeroinfra/providers/app_providers.dart';
-import 'package:zeroinfra/services/mesh_provider.dart';
 
 void main() {
   testWidgets('la app arranca y muestra las cuatro pestañas', (tester) async {
@@ -12,10 +10,7 @@ void main() {
     await tester.pumpWidget(
       AppProviders(
         repository: FakeMeshRepository(),
-        child: ChangeNotifierProvider(
-          create: (_) => MeshProvider(),
-          child: const ZeroInfraApp(),
-        ),
+        child: const ZeroInfraApp(),
       ),
     );
 
