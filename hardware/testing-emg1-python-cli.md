@@ -57,50 +57,88 @@ La configuración añade dos entornos **sin sustituir** `env:tbeam`. El módulo 
 La herramienta `tools/emergency_cli.py` permite construir tramas y probar el formato localmente sin transmitir, por defecto:
 
 ```bash
-python3 tools/emergency_cli.py --origin 0x12345678 --text "Alerta de prueba"
+# Con el nodo 2b14 transmitiendo
+python3 tools/emergency_cli.py --origin 0x82e09b4e --text "Alerta de prueba"
 ```
 
 Para transmitir por USB a un nodo Meshtastic (requiere `pip install meshtastic` y autorización para usar el puerto):
 
 ```bash
+# Con el nodo 2b14 transmitiendo
 python3 tools/emergency_cli.py --port /dev/ttyACM0 \
-    --origin 0x12345678 --text "Alerta de prueba" --send
+    --origin 0x82e09b4e --text "Alerta de prueba" --send
 ```
 
-Si quieres que esa retransmision también se pueda recibir por el canal de texto normal hay que usar el argumento `:w
---mirror-chat`
+Si quieres que esa retransmision también se pueda recibir por el canal de texto normal hay que usar el argumento `--mirror-chat`:
 
 ```bash
+# Con el nodo 2b14 transmitiendo
 python3 tools/emergency_cli.py --port /dev/ttyACM0 \
-    --origin 0x12345678 --text "Alerta de prueba" --send
+    --origin 0x82e09b4e --text "Alerta de prueba" --send --mirror-chat
 ```
 
-**`--origin` debe corresponder al NodeNum real del emisor.** No sirve cualquier valor inventado: el módulo verifica el origen en la trama recibida. Usa la CLI original de Meshtastic para consultar los NodeNum de los dispositivos.
+**`--origin` debe corresponder al NodeNum real del emisor.** Para consultar el número se puede hacer con el siguiente comando:
+
+```bash
+meshtastic --port /dev/ttyACM0 --info
+```
 
 Para un mensaje directo que solicita recibo de la aplicación:
 
 ```bash
-python3 tools/emergency_cli.py --port /dev/ttyACM0 \
-    --origin 0x12345678 --destination '!87654321' --receipt \
-    --text "Alerta de prueba" --send
+python3 ~/UNI/Q7/meshtastic_emergency_patchkit/tools/emergency_cli.py \
+    --port /dev/ttyACM0 \
+    --origin 0x82e09b4e \
+    --mode alert \
+    --severity 3 \
+    --text "SOS de prueba desde el nodo 2b14" \
+    --send
 ```
 
-Para recuperar la alerta más reciente almacenada temporalmente en otro nodo:
-
-```bash
-python3 tools/emergency_cli.py --port /dev/ttyACM0 \
-    --mode fetch --destination '!87654321' --send
-```
-
-Para visualizar la recepción desde otro puerto USB:
+Para visualizar la recepción desde otro puerto USB mediante la API de Meshtastic:
 
 ```bash
 python3 tools/emergency_cli.py --port /dev/ttyACM1 --listen
 ```
 
-La interfaz Python de Meshtastic puede evolucionar; la llamada `sendData()` de esta herramienta **no se ha probado contra dispositivos físicos aquí**.
+Para ver el flujo de acciones en la placa receptora, hay que activar la lectura de puertos serie por defecto primero. Después, abrimos el baudrate adecuado desde el terminal de pio:
 
-## Ejecución de pruebas locales
+```bash
+# Esto en una terminal normal
+meshtastic --port /dev/ttyACM1 \
+    --set security.debug_log_api_enabled true
+
+# Esto en la terminal de pio
+pio device monitor -p /dev/ACM1 -b 115200
+```
+
+Ejemplo de salida de /dev/ACM1:
+
+```bash
+Routing sniffing DEBUG | ??:??:?? 25 [RadioIf] Lora RX (id=0xa833ad0b fr=0x82e09b4e to=0xffffffff, transport = 0, WantAck=0, HopLim=3 Ch=8 encrypted len=75 rxSNR=12.25 rxRSSI=-57 hopStart=3 relay=0x4e)
+DEBUG | ??:??:?? 25 [RadioIf] Packet RX: 805ms
+INFO  | ??:??:?? 25 [RadioIf] EMG_RXQ,accepted=1,evicted=0
+DEBUG | ??:??:?? 25 [Router] Use channel 0 (hash 0x8)
+DEBUG | ??:??:?? 25 [Router] Expand short PSK #1
+DEBUG | ??:??:?? 25 [Router] Use AES128 key
+DEBUG | ??:??:?? 25 [Router] decoded message (id=0xa833ad0b fr=0x82e09b4e to=0xffffffff, transport = 1, WantAck=0, HopLim=3 Ch=0 Portnum=256 rxSNR=12.25 rxRSSI=-57 hopStart=3 relay=0x4e)
+DEBUG | ??:??:?? 25 [Router] handleReceived(REMOTE) (id=0xa833ad0b fr=0x82e09b4e to=0xffffffff, transport = 1, WantAck=0, HopLim=3 Ch=0 Portnum=256 rxSNR=12.25 rxRSSI=-57 hopStart=3 relay
+INFO  | ??:??:?? 25 [Router] EMG_APP_RX,kind=1,origin=82e09b4e,from=82e09b4e,id=c88973e8,severity=3
+DEBUG | ??:??:?? 25 [Router] Routing sniffing (id=0xa833ad0b fr=0x82e09b4e to=0xffffffff, transport = 1, WantAck=0, HopLim=3 Ch=0 Portnum=256 rxSNR=12.25 rxRSSI=-57 hopStart=3 relay=0x4e)
+INFO  | ??:??:?? 25 [Router] Rebroadcast msg from 4e
+DEBUG | ??:??:?? 25 [Router] Expand short PSK #1
+DEBUG | ??:??:?? 25 [Router] Use AES128 key
+DEBUG | ??:??:?? 25 [Router] enqueue for send (id=0xa833ad0b fr=0x82e09b4e to=0xffffffff, transport = 1, WantAck=0, HopLim=2 Ch=8 encrypted len=75 rxSNR=12.25 rxRSSI=-57 hopStart=3 relay=
+DEBUG | ??:??:?? 25 [Router] Delivering rx packet (id=0xa833ad0b fr=0x82e09b4e to=0xffffffff, transport = 1, WantAck=0, HopLim=3 Ch=0 Portnum=256 rxSNR=12.25 rxRSSI=-57 hopStart=3 relay=0
+INFO  | ??:??:?? 25 [Router] Sort took 0 ms
+DEBUG | ??:??:?? 25 [Router] Forwarding to phone (id=0xa833ad0b fr=0x82e09b4e to=0xffffffff, transport = 1, WantAck=0, HopLim=3 Ch=0 Portnum=256 rxSNR=12.25 rxRSSI=-57 hopStart=3 relay=0x
+DEBUG | ??:??:?? 26 [RadioIf] Started Tx (id=0xa833ad0b fr=0x82e09b4e to=0xffffffff, transport = 1, WantAck=0, HopLim=2 Ch=8 encrypted len=75 rxSNR=12.25 rxRSSI=-57 hopStart=3 relay=0x43 p
+DEBUG | ??:??:?? 27 [RadioIf] Packet TX: 805ms
+DEBUG | ??:??:?? 27 [RadioIf] Completed sending (id=0xa833ad0b fr=0x82e09b4e to=0xffffffff, transport = 1, WantAck=0, HopLim=2 Ch=8 encrypted len=75 rxSNR=12.25 rxRSSI=-57 hopStart=3 relay
+```
+
+
+## Ejecución de pruebas locales (todavía sin testear)
 
 No requieren antenas ni transmisiones de radio:
 
@@ -115,22 +153,3 @@ g++ -std=c++17 -Wall -Wextra -Werror -Itests/stubs \
 ```
 
 Las clases de `tests/stubs/` **no son la librería real**; solo comprueban sintaxis de parte de la implementación. Antes de afirmar que funciona hay que compilar todo el firmware y ejecutar tests de integración con dos o más T-Beam.
-
-## Qué incorpora
-
-- Instrumentación de cola TX: aceptados, rechazados, expulsados, cancelados, enviados desde cola, pico de ocupación y espera media/máxima. Métricas RX de aceptados y descartados, CAD ocupado/libre, inicios TX, ACK/NAK y mensajes fiables.
-- Reconocimiento local de los paquetes experimentales `ALERT` y asignación de prioridad Meshtastic `ALERT` **en el nodo origen**.
-- Módulo `Emergency` opcional con formato `EMG1`, caducidad, deduplicación de alertas por identificador de aplicación y origen, lista de emisores admitidos, recibos directos de aplicación, retención temporal en RAM (8 alertas) y recuperación mediante peticiones directas `FETCH`.
-- Política de *aging* de cola estrictamente optativa, que no eleva mensajes normales por encima de prioridad 99 ni modifica las prioridades originales almacenadas.
-- Dos entornos PlatformIO propios para T-Beam, con MQTT deshabilitado por bandera de compilación. No se eliminan código GPS, BLE, radio, routing, cifrado ni módulos del firmware original.
-
-## Qué NO incorpora y por qué
-
-- **Ni modifica CSMA/CAD, el backoff ni las reglas de flood/next-hop.** Esos cambios requieren una línea base experimental, compatibilidad y verificación de la normativa radioeléctrica; el manual original recomienda medir antes de intervenir.
-- **No garantiza recepción ni alta disponibilidad.** El acuse de aplicación confirma procesamiento local del módulo, no lectura humana. Los recibos solo se emiten en unicast, con limitación de frecuencia.
-- **No propaga la prioridad ALERT a través de cabeceras LoRa.** La prioridad es local; cambiar el protocolo en aire comprometería compatibilidad. Los retransmisores estándar siguen aplicando su propia política.
-- **No conserva alertas después de reiniciar.** El almacén de 8 alertas es volátil, con antigüedad máxima de una hora en RAM, y devuelve una alerta por petición como máximo.
-- **No implementa una prueba de identidad criptográfica del origen.** Una lista de NodeNum no evita la falsificación de IDs. No lo uses para emergencias reales sin autenticación y validación adicionales.
-- **No demuestra menor latencia ni mayor fiabilidad.** Se necesitan mediciones comparadas y tests con las placas para sostener cualquiera de esas afirmaciones.
-
-Consulta `docs/CAMBIOS_POR_ARCHIVO.md` para la localización exacta de todos los cambios y sus puntos de inserción.
