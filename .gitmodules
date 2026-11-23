@@ -1,0 +1,3 @@
+[submodule "hardware/firmware-emergency"]
+	path = hardware/firmware-emergency
+	url = git@github.com:crisfrias/firmware-emergency.git

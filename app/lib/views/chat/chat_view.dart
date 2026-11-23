@@ -1,8 +1,12 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../../models/mesh_message.dart';
-import '../../services/mesh_provider.dart';
+import '../../providers/chat_provider.dart';
+import '../../providers/connection_provider.dart';
+import '../../providers/nodes_provider.dart';
 
 class ChatView extends StatefulWidget {
   const ChatView({super.key});
@@ -14,7 +18,8 @@ class ChatView extends StatefulWidget {
 class _ChatViewState extends State<ChatView> {
   final TextEditingController _messageController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
-  String _selectedTarget = 'broadcast';
+  int _selectedChannel = 0;
+  int? _selectedNodeNum;
 
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -28,27 +33,49 @@ class _ChatViewState extends State<ChatView> {
     });
   }
 
-  void _handleSend() {
+  Future<void> _handleSend({int? toNode}) async {
     final text = _messageController.text;
     if (text.trim().isEmpty) return;
-    context.read<MeshProvider>().sendMessage(
+    final bytes = utf8.encode(text).length;
+    if (bytes > 233) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('El mensaje supera el limite de 233 bytes UTF-8.'),
+        ),
+      );
+      return;
+    }
+    final ok = await context.read<ChatProvider>().sendText(
       text,
-      recipientId: _selectedTarget,
+      toNode: toNode,
+      channel: _selectedChannel,
     );
-    _messageController.clear();
-    _scrollToBottom();
+    if (!mounted) return;
+    if (ok) {
+      _messageController.clear();
+      setState(() {});
+      _scrollToBottom();
+    } else {
+      final error = context.read<ChatProvider>().errorMessage;
+      if (error != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(error), backgroundColor: Colors.redAccent),
+        );
+      }
+    }
   }
 
-  Widget _buildStatusIcon(MessageStatus status) {
+  Widget _buildStatusIcon(MeshMessage message) {
+    final status = message.status;
     switch (status) {
       case MessageStatus.queued:
         return const Tooltip(
-          message: 'En cola BLE / Transfiriendo a placa',
+          message: 'En cola local (pendiente de entregar al nodo)',
           child: Icon(Icons.access_time, size: 14, color: Colors.amberAccent),
         );
       case MessageStatus.transmitted:
         return const Tooltip(
-          message: 'Emitido por radio LoRa (TX)',
+          message: 'Aceptado por el nodo local (BLE)',
           child: Icon(
             Icons.wifi_tethering,
             size: 14,
@@ -56,13 +83,15 @@ class _ChatViewState extends State<ChatView> {
           ),
         );
       case MessageStatus.ack:
-        return const Tooltip(
-          message: 'ACK confirmado por el receptor',
+        return Tooltip(
+          message: message.isDirect
+              ? 'Confirmado por el destinatario'
+              : 'Retransmitido por la malla (acuse implícito)',
           child: Icon(Icons.done_all, size: 14, color: Colors.greenAccent),
         );
       case MessageStatus.failed:
         return const Tooltip(
-          message: 'Sin acuse de recibo (Fallo de enlace)',
+          message: 'Fallo de envio o entrega',
           child: Icon(Icons.error_outline, size: 14, color: Colors.redAccent),
         );
     }
@@ -70,11 +99,24 @@ class _ChatViewState extends State<ChatView> {
 
   @override
   Widget build(BuildContext context) {
-    final provider = context.watch<MeshProvider>();
-    final peerNodes = provider.nodes
-        .where((node) => node.id != provider.connectedNodeId)
-        .toList();
-    final messages = provider.getMessagesForChannel(_selectedTarget);
+    final chat = context.watch<ChatProvider>();
+    final nodes = context.watch<NodesProvider>();
+    final connection = context.watch<ConnectionProvider>();
+    final peerNodes = nodes.others;
+    final channels = chat.channels;
+    final hasChannelZero = channels.any((channel) => channel.index == 0);
+    final effectiveNodeNum =
+        _selectedNodeNum != null &&
+            peerNodes.any((node) => node.nodeNum == _selectedNodeNum)
+        ? _selectedNodeNum
+        : null;
+    final messages = effectiveNodeNum == null
+        ? chat.broadcastMessages(_selectedChannel)
+        : chat.directMessages(effectiveNodeNum);
+    final byteCount = utf8.encode(_messageController.text).length;
+    final selectedValue = effectiveNodeNum == null
+        ? 'channel_$_selectedChannel'
+        : 'node$effectiveNodeNum';
 
     return Scaffold(
       body: Column(
@@ -99,25 +141,42 @@ class _ChatViewState extends State<ChatView> {
                   child: DropdownButtonHideUnderline(
                     child: DropdownButton<String>(
                       isExpanded: true,
-                      value: _selectedTarget,
+                      value: selectedValue,
                       items: [
-                        const DropdownMenuItem(
-                          value: 'broadcast',
-                          child: Row(
-                            children: [
-                              Icon(
-                                Icons.podcasts,
-                                size: 18,
-                                color: Colors.amberAccent,
-                              ),
-                              SizedBox(width: 8),
-                              Text('Difusión General (Canal 0)'),
-                            ],
+                        if (!hasChannelZero)
+                          const DropdownMenuItem(
+                            value: 'channel_0',
+                            child: Row(
+                              children: [
+                                Icon(
+                                  Icons.podcasts,
+                                  size: 18,
+                                  color: Colors.amberAccent,
+                                ),
+                                SizedBox(width: 8),
+                                Text('Primario'),
+                              ],
+                            ),
+                          ),
+                        ...channels.map(
+                          (channel) => DropdownMenuItem(
+                            value: 'channel_${channel.index}',
+                            child: Row(
+                              children: [
+                                const Icon(
+                                  Icons.podcasts,
+                                  size: 18,
+                                  color: Colors.amberAccent,
+                                ),
+                                const SizedBox(width: 8),
+                                Text('Difusión: ${channel.displayName}'),
+                              ],
+                            ),
                           ),
                         ),
                         ...peerNodes.map(
                           (node) => DropdownMenuItem(
-                            value: node.id,
+                            value: 'node${node.nodeNum}',
                             child: Row(
                               children: [
                                 Icon(
@@ -136,28 +195,24 @@ class _ChatViewState extends State<ChatView> {
                       ],
                       onChanged: (value) {
                         if (value == null) return;
-                        setState(() => _selectedTarget = value);
+                        setState(() {
+                          if (value.startsWith('channel_')) {
+                            _selectedChannel =
+                                int.tryParse(
+                                  value.substring('channel_'.length),
+                                ) ??
+                                0;
+                            _selectedNodeNum = null;
+                          } else if (value.startsWith('node')) {
+                            _selectedNodeNum = int.tryParse(
+                              value.substring('node'.length),
+                            );
+                          }
+                        });
                         _scrollToBottom();
                       },
                     ),
                   ),
-                ),
-                IconButton(
-                  tooltip: 'Simular mensaje LoRa entrante',
-                  icon: const Icon(
-                    Icons.sim_card_download_outlined,
-                    size: 20,
-                    color: Colors.tealAccent,
-                  ),
-                  onPressed: () {
-                    provider.simulateIncomingMessage(
-                      fromNodeId: _selectedTarget == 'broadcast'
-                          ? null
-                          : _selectedTarget,
-                      isDirect: _selectedTarget != 'broadcast',
-                    );
-                    _scrollToBottom();
-                  },
                 ),
               ],
             ),
@@ -167,7 +222,7 @@ class _ChatViewState extends State<ChatView> {
             child: messages.isEmpty
                 ? Center(
                     child: Text(
-                      _selectedTarget == 'broadcast'
+                      effectiveNodeNum == null
                           ? 'No hay mensajes en el canal de difusión.'
                           : 'Canal directo vacío con este nodo.',
                       style: TextStyle(color: Colors.grey[500]),
@@ -240,7 +295,7 @@ class _ChatViewState extends State<ChatView> {
                                   ),
                                   if (message.isMe) ...[
                                     const SizedBox(width: 6),
-                                    _buildStatusIcon(message.status),
+                                    _buildStatusIcon(message),
                                   ],
                                 ],
                               ),
@@ -260,20 +315,45 @@ class _ChatViewState extends State<ChatView> {
             child: Row(
               children: [
                 Expanded(
-                  child: TextField(
-                    controller: _messageController,
-                    onSubmitted: (_) => _handleSend(),
-                    decoration: InputDecoration(
-                      hintText: _selectedTarget == 'broadcast'
-                          ? 'Transmitir en canal difusión general...'
-                          : 'Mensaje directo cifrado P2P...',
-                      border: InputBorder.none,
-                    ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      TextField(
+                        controller: _messageController,
+                        onChanged: (_) => setState(() {}),
+                        onSubmitted: (_) => connection.isConnected
+                            ? _handleSend(toNode: effectiveNodeNum)
+                            : null,
+                        decoration: InputDecoration(
+                          hintText: effectiveNodeNum == null
+                              ? 'Transmitir en canal difusión general...'
+                              : 'Mensaje directo cifrado P2P...',
+                          border: InputBorder.none,
+                        ),
+                      ),
+                      Text(
+                        '$byteCount / 233 bytes UTF-8',
+                        style: TextStyle(
+                          fontSize: 10,
+                          color: byteCount > 233
+                              ? Colors.redAccent
+                              : Colors.grey[500],
+                        ),
+                      ),
+                      if (!connection.isConnected)
+                        const Text(
+                          'Conecta un nodo en la pestaña Nodos.',
+                          style: TextStyle(fontSize: 11, color: Colors.amber),
+                        ),
+                    ],
                   ),
                 ),
                 IconButton(
                   icon: const Icon(Icons.send, color: Colors.deepOrange),
-                  onPressed: _handleSend,
+                  onPressed: connection.isConnected
+                      ? () => _handleSend(toNode: effectiveNodeNum)
+                      : null,
                 ),
               ],
             ),
