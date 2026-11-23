@@ -1,3 +1,4 @@
+import 'dart:convert';
 import '../../core/emergency_codec.dart';
 import '../../generated/meshtastic/mesh.pbenum.dart' show MeshPacket_Priority;
 import '../../generated/meshtastic/portnums.pbenum.dart' show PortNum;
@@ -25,6 +26,9 @@ abstract final class EmergencyPolicy {
   /// Texto del SOS tras las coordenadas. Debe ser corto: si el paquete no
   /// cabe junto con la firma, pierde la prioridad en los retransmisores.
   static const String text = 'SOS';
+  /// Presupuesto conservador para facilitar firmas XEdDSA en broadcast.
+  /// NO es una garantía de firma: depende de otros campos y del firmware.
+  static const int maxSignedSosTextBytes = 120;
 }
 
 /// Posición dentro del texto de un EMG1: `@41.38879,2.11296 SOS`.
@@ -42,10 +46,34 @@ abstract final class EmergencyText {
     double? longitude,
     String body = EmergencyPolicy.text,
   }) {
-    if (latitude == null || longitude == null) return body;
-    final lat = latitude.toStringAsFixed(5);
-    final lon = longitude.toStringAsFixed(5);
-    return '@$lat,$lon $body';
+    // Si falta una coordenada o los valores son inválidos, enviar el SOS
+    // sin localización. El envío de una alerta nunca depende del GPS.
+    final validPosition = latitude != null &&
+        longitude != null &&
+        latitude.isFinite &&
+        longitude.isFinite &&
+        latitude.abs() <= 90 &&
+        longitude.abs() <= 180;
+    final prefix = validPosition
+        ? '@${latitude!.toStringAsFixed(5)},${longitude!.toStringAsFixed(5)} '
+        : '';
+    final text = body.trim().isEmpty ? EmergencyPolicy.text : body;
+    final full = '$prefix$text';
+    if (utf8.encode(full).length <= EmergencyPolicy.maxSignedSosTextBytes) {
+      return full;
+    }
+    // Truncar por caracteres Unicode completos, no por bytes: nunca
+    // generar UTF-8 corrupto ni bloquear el envío por un texto demasiado largo.
+    var used = utf8.encode(prefix).length;
+    final result = StringBuffer(prefix);
+    for (final codePoint in text.runes) {
+      final character = String.fromCharCode(codePoint);
+      final bytes = utf8.encode(character).length;
+      if (used + bytes > EmergencyPolicy.maxSignedSosTextBytes) break;
+      result.write(character);
+      used += bytes;
+    }
+    return result.toString();
   }
 
   /// Posición al principio de [text]; null si no la lleva o está fuera de
