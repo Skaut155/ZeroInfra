@@ -1,0 +1,5 @@
+# Optional: omit this setting to use the cluster's default StorageClass.
+# storage_class_name = "gp3"
+
+storage_size = "10Gi"
+namespace    = "mqtt"
