@@ -31,13 +31,12 @@ Tal como lo implementan `BleMeshTransport`, `MeshtasticBleService` y `Meshtastic
 1. **Permisos:** `BleMeshTransport` pide los permisos de Bluetooth (ver más abajo) antes de cada escaneo o conexión. Si faltan, lanza `MeshPermissionException`.
 2. **Comprobar Bluetooth:** la primera vez se comprueba que el móvil soporta Bluetooth (`StateError` si no). El escaneo espera hasta 5 s a que el adaptador esté encendido (`StateError` «El Bluetooth está apagado» si no). El escaneo filtra por el UUID del servicio y dura como máximo 15 s.
 3. **Conectar:** `device.connect()` de flutter_blue_plus. En Android ya negocia un MTU de 512 por defecto, así que no se llama a `requestMtu`; en iOS lo negocia el sistema.
-4. **Emparejar (solo Android):** `device.createBond()` muestra el diálogo del PIN si el móvil aún no está emparejado y espera hasta 90 s. Sin este paso, el PIN aparecía al escribir en `toRadio`, cuya escritura caduca a los 15 s, y la primera vinculación fallaba. Si ya estaba emparejado, sigue sin esperar.
-5. **Descubrir servicios** y localizar el servicio Meshtastic y sus 3 características (toRadio, fromRadio, fromNum). Si falta alguna, se desconecta y se lanza `StateError`.
-6. **Suscribirse a fromNum** (`setNotifyValue(true)`).
-7. **Pedir la configuración:** el cliente escribe `ToRadio.want_config_id` con un número aleatorio (≥ 100000, porque el firmware reserva algunos valores menores). Estado `configuring`.
-8. **Vaciar fromRadio:** se lee hasta obtener una lectura vacía; cada lectura es un `FromRadio`.
-9. **Esperar `config_complete_id`** con el mismo número, con un tiempo máximo de 30 s (`TimeoutException` si no llega). Entonces el estado pasa a `connected` y se publican nodos y canales.
-10. A partir de ahí, **cada notificación de fromNum** provoca un vaciado de fromRadio. Si llega un aviso mientras se está vaciando, se da una vuelta más al terminar (nunca hay dos lecturas en paralelo).
+4. **Descubrir servicios** y localizar el servicio Meshtastic y sus 3 características (toRadio, fromRadio, fromNum). Si falta alguna, se desconecta y se lanza `StateError`.
+5. **Suscribirse a fromNum** (`setNotifyValue(true)`).
+6. **Pedir la configuración:** el cliente escribe `ToRadio.want_config_id` con un número aleatorio (≥ 100000, porque el firmware reserva algunos valores menores). Estado `configuring`.
+7. **Vaciar fromRadio:** se lee hasta obtener una lectura vacía; cada lectura es un `FromRadio`.
+8. **Esperar `config_complete_id`** con el mismo número, con un tiempo máximo de 30 s (`TimeoutException` si no llega). Entonces el estado pasa a `connected` y se publican nodos y canales.
+9. A partir de ahí, **cada notificación de fromNum** provoca un vaciado de fromRadio. Si llega un aviso mientras se está vaciando, se da una vuelta más al terminar (nunca hay dos lecturas en paralelo).
 
 Si cualquier paso falla, la app desconecta y vuelve a `disconnected`. Al perderse el enlace, los mensajes propios que aún no se habían entregado al nodo (`queued`) pasan a `failed`.
 
@@ -63,8 +62,8 @@ Cualquier paquete de otro nodo actualiza su SNR y su última hora de recepción.
 
 | Puerto | Qué hace la app |
 |---|---|
-| `TEXT_MESSAGE_APP` (1) | Mensaje de texto; si el texto tiene formato SOS, también es un SOS. |
-| `ALERT_APP` (11) | Igual que el anterior; es el puerto por el que la app envía los SOS. |
+| `TEXT_MESSAGE_APP` (1) | Mensaje de texto. |
+| `PRIVATE_APP` (256) | SOS en formato EMG1 (alerta, cancelación o reenvío); ver la sección 7 de `docs/APP_CAPA_DATOS.md`. Lo que no es un EMG1 válido se descarta. |
 | `POSITION_APP` (3) | Actualiza la posición del nodo (0,0 se interpreta como «sin posición»). |
 | `NODEINFO_APP` (4) | Actualiza nombre largo y corto. |
 | `TELEMETRY_APP` (67) | Actualiza la batería (`device_metrics.battery_level`, limitado a 0-100). |
@@ -77,8 +76,8 @@ Los mensajes se envían como `ToRadio.packet` con:
 - `to`: el nodo destino, o `0xFFFFFFFF` (difusión).
 - `want_ack: true`.
 - `id`: aleatorio y generado en la app (no en el nodo), para poder casarlo con el acuse `Routing.request_id`.
-- `hop_limit` siempre explícito: el que informa el nodo en su configuración LoRa, o 3 por defecto. Un paquete con `hop_limit` 0 solo llega a los vecinos directos. El SOS usa 7 (ver `SosPolicy` en `docs/APP_CAPA_DATOS.md`).
-- `decoded.portnum` y `decoded.payload` (texto en UTF-8, máximo 233 bytes).
+- `hop_limit` siempre explícito: el que informa el nodo en su configuración LoRa, o 3 por defecto. Un paquete con `hop_limit` 0 solo llega a los vecinos directos. El SOS usa 7 (ver `EmergencyPolicy` en `docs/APP_CAPA_DATOS.md`).
+- `decoded.portnum` y `decoded.payload` (texto en UTF-8 o, en el SOS, un EMG1 binario; máximo 233 bytes).
 
 Interpretación del acuse: con `error_reason` distinto de `NONE` el mensaje pasa a `failed`. En difusión, cualquier acuse sin error cuenta como `ack` (el firmware genera un acuse implícito al oír que otro nodo retransmite). En un mensaje directo solo cuenta el acuse cuyo remitente es el destinatario.
 
@@ -94,5 +93,5 @@ Si un permiso queda denegado de forma permanente, la vista Nodos ofrece abrir lo
 
 ## Pendiente de verificar con la placa
 
-- **Emparejamiento / PIN:** probado el 18/11 con una T-Beam. Antes del cambio, la primera vinculación fallaba (ver paso 4). Falta repetir la prueba con un móvil sin emparejar para confirmar la corrección.
+- **Emparejamiento / PIN:** lo gestiona el sistema operativo; no se ha probado aún con las T-Beam.
 - **UUID:** confirmar con nRF Connect que la placa publica el servicio y las características de la tabla anterior.

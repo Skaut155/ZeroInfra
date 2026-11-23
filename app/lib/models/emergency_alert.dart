@@ -23,6 +23,14 @@ class EmergencyAlert {
   String? resolutionNote;
   int? receiptFromNode;
 
+  // Añadidos por la capa de datos (opcionales):
+  /// Posición que trae el texto de la alerta; null si no la trae.
+  final double? latitude;
+  final double? longitude;
+  /// El firmware verificó la firma del emisor (`MeshPacket.xeddsa_signed`).
+  /// Si es false, cualquiera podría haber suplantado al origen.
+  final bool isVerified;
+
   EmergencyAlert({
     required this.id,
     required this.originNode,
@@ -38,9 +46,14 @@ class EmergencyAlert {
     this.isReplay = false,
     this.resolutionNote,
     this.receiptFromNode,
+    this.latitude,
+    this.longitude,
+    this.isVerified = false,
   });
 
   String get compositeKey => '${originNode}_$id';
+
+  bool get hasPosition => latitude != null && longitude != null;
 
   bool get isBroadcast => destinationNode == 0xffffffff;
 

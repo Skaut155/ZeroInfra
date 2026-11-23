@@ -14,7 +14,7 @@ Esta guía explica cómo conectar las vistas de Flutter (chat, mapa, SOS) a la m
 | Providers | `providers/` | `ChangeNotifier` con el estado de cada vista. Se registran en `app_providers.dart`. |
 | Contrato | `data/mesh_repository.dart` | `MeshRepository`: interfaz única de la que dependen los providers. |
 | Protocolo Meshtastic | `data/meshtastic/meshtastic_client.dart` | `MeshtasticClient`: implementa `MeshRepository` hablando `ToRadio`/`FromRadio` (Protobuf). |
-| SOS | `data/meshtastic/sos_protocol.dart` | `SosPolicy` y `SosCodec`: todo lo que distingue un SOS (provisional). |
+| SOS | `data/meshtastic/emergency_policy.dart` | `EmergencyPolicy` y `EmergencyText`: cómo viaja un SOS en EMG1 y cómo se escribe la posición en su texto. El códec binario es `core/emergency_codec.dart` (Carlos). |
 | Transporte | `data/ble/mesh_transport.dart` | `MeshTransport`: bytes de entrada y salida, sin Protobuf. |
 | BLE | `data/ble/ble_mesh_transport.dart` → `data/ble/meshtastic_ble_service.dart` | `BleMeshTransport` (permisos y adaptación) sobre `MeshtasticBleService` (flutter_blue_plus). |
 | Simulación | `data/fake/fake_mesh_repository.dart` | `FakeMeshRepository`: otra implementación de `MeshRepository`, sin placa. |
@@ -174,7 +174,8 @@ Cada mensaje propio aparece en la lista en cuanto se envía (`queued`) y se sust
 | `latitude` / `longitude` | `double?` | Posición del nodo propio (la que viaja en el SOS); null sin GPS. |
 | `hasPosition` | `bool` | Hay posición. |
 | `lastSignal` | `MeshMessage?` | Último SOS o cancelación enviado, con su `status` de entrega. |
-| `errorMessage` | `String?` | Motivo del último fallo. |
+| `errorMessage` | `String?` | Motivo del último fallo (por ejemplo, cancelar sin un SOS activo). |
+| `alerts` | `List<EmergencyAlert>` | Alertas de otros nodos sin cancelar ni caducar, la más reciente última. |
 | `send()` | `Future<bool>` | Envía el SOS. |
 | `cancel()` | `Future<bool>` | Envía la cancelación. |
 
@@ -190,7 +191,18 @@ ElevatedButton(
 );
 ```
 
-Los SOS de otros nodos no llegan por `SosProvider`: se ven como `MeshNode.isEmergency` en `NodesProvider` (y su posición, si la mandan) y como mensaje con `isSos` en `ChatProvider`.
+Los SOS de otros nodos están en `SosProvider.alerts` (con `isVerified`, `latitude` y `longitude`). Además marcan el nodo con `MeshNode.isEmergency` en `NodesProvider` (con su posición, si la mandan) y llegan al chat como mensaje con `isSos`.
+
+```dart
+for (final alert in context.watch<SosProvider>().alerts)
+  ListTile(
+    title: Text(MeshNode.idFromNum(alert.originNode)),
+    subtitle: Text(alert.hasPosition
+        ? '${alert.latitude!.toStringAsFixed(4)}, ${alert.longitude!.toStringAsFixed(4)}'
+        : 'Sin posición'),
+    trailing: alert.isVerified ? null : const Text('No verificada'),
+  );
+```
 
 ## 5. Modelos (`app/lib/models/`)
 
@@ -237,7 +249,7 @@ final nuncaOido = node.lastHeard == MeshNode.neverHeard;
 | `senderId` | `String` | Carlos | Id en texto del remitente (`"!a1b2c3d4"`). |
 | `senderName` | `String` | Carlos | Nombre del remitente al crear el mensaje. |
 | `recipientId` | `String?` | Carlos | `MeshMessage.broadcastId` (`'broadcast'`) en difusión; id del destinatario en un directo. |
-| `content` | `String` | Carlos | Texto. En un SOS, el texto codificado (ver sección 7). |
+| `content` | `String` | Carlos | Texto. En un SOS, una descripción legible, por ejemplo `SOS · 41.38879, 2.11296` o `SOS cancelado` (ver sección 7). |
 | `timestamp` | `DateTime` | Carlos | Hora de envío o de recepción en este móvil. |
 | `isMe` | `bool` | Carlos | Enviado desde este móvil. |
 | `status` | `MessageStatus` | Carlos | Estado de entrega (abajo). La capa real no lo modifica: emite una copia. |
@@ -293,48 +305,62 @@ Conviene que los textos de ayuda de los iconos de estado reflejen esto (por ejem
 
 **Límite del texto:** 233 bytes en UTF-8 (no caracteres: una letra con tilde ocupa 2 bytes). Un texto vacío o más largo hace que `sendText` devuelva `false` con el motivo en `errorMessage`. Conviene limitar el campo de texto en la vista. El simulador no aplica este límite.
 
-## 7. SOS (PROVISIONAL, pendiente de acuerdo del equipo)
+## 7. SOS en formato EMG1
 
-Esta sección va dirigida también a Cristina (firmware) y Andrés (backend). Nada de esto está cerrado; todo lo que distingue un SOS está aislado en `app/lib/data/meshtastic/sos_protocol.dart`. Cristina propone sustituirlo por su formato EMG1 cuando su firmware esté cerrado; qué cambiaría está en [`CAMBIOS_CAPA_DATOS.md`](CAMBIOS_CAPA_DATOS.md#5-sos-y-emg1).
+Esta sección va dirigida también a Cristina (firmware) y Andrés (backend). El SOS viaja en EMG1, el formato del firmware de Cristina (`EmergencyWire.h`), que la app codifica con `core/emergency_codec.dart`. Todo lo que decide cómo se envía está en `app/lib/data/meshtastic/emergency_policy.dart`.
 
-### Cómo se envía (`SosPolicy`)
+### Cómo se envía (`EmergencyPolicy`)
 
 | Constante | Valor | Qué es |
 |---|---|---|
-| `portNum` | `PortNum.ALERT_APP` (11) | Puerto de Meshtastic para alertas críticas. |
-| `priority` | `MeshPacket_Priority.ALERT` (110) | Prioridad del paquete. |
-| `hopLimit` | 7 | TTL en saltos; 7 es el máximo del protocolo (3 bits en la cabecera). |
+| `portNum` | `PortNum.PRIVATE_APP` (256) | El puerto que reconoce el módulo de emergencias del firmware. |
+| `priority` | `MeshPacket_Priority.ALERT` (110) | Prioridad en el nodo emisor (el firmware la fija igualmente). |
+| `hopLimit` | 7 | TTL en saltos; 7 es el máximo del protocolo. |
 | `channel` | 0 | Canal primario. |
+| `severity` | 3 | Gravedad (1 a 3). |
+| `expiresUnix` | 0 | Sin caducidad: la hora de las placas puede no ser fiable. |
+| `text` | `SOS` | Texto tras las coordenadas. Corto, para que el paquete quepa junto con la firma. |
 
-El paquete se envía en difusión y con acuse (`want_ack`). La app envía **un solo paquete** por SOS (y uno por cancelación); los reintentos los hace el firmware. No hay baliza repetitiva.
+- **SOS:** un EMG1 de tipo ALERT, en difusión y con `want_ack`, con `originNode` = nuestro nodo e `id` aleatorio distinto de 0. Va en difusión porque Meshtastic solo firma las difusiones, y el firmware solo da prioridad en cada salto a las alertas firmadas.
+- **Cancelación:** un EMG1 de tipo RESOLVED con el mismo `id` y `originNode`. El cliente recuerda el SOS activo (también tras reconectar con el mismo nodo). Sin un SOS activo, `cancelSos` lanza `StateError`.
+- Un solo paquete por SOS y otro por cancelación; los reintentos los hace el firmware.
 
-### Formato del texto (`SosCodec`)
+### La posición va en el texto (`EmergencyText`)
+
+EMG1 no tiene campos de posición, así que las coordenadas van al principio del texto, con 5 decimales:
 
 ```text
-SOS|v1|!a1b2c3d4|41.38879|2.11296   alerta con posición (5 decimales)
-SOS|v1|!a1b2c3d4||                  alerta sin GPS (posición vacía)
-SOS|v1|!a1b2c3d4|CANCEL             cancelación
+@41.38879,2.11296 SOS    alerta con posición
+SOS                      alerta sin GPS
 ```
-
-`!a1b2c3d4` es el id del nodo emisor. Al recibir, la app se fía del remitente del paquete y no del id escrito en el texto.
 
 ### Recepción
 
-La app acepta un SOS tanto por `ALERT_APP` como por `TEXT_MESSAGE_APP`, siempre que el texto tenga este formato. Al recibirlo marca al nodo remitente con `isEmergency` (y actualiza su posición si viene) y lo muestra en el chat con `isSos` (y, por tanto, `isEmergency`). Una cancelación quita la marca.
+Por `PRIVATE_APP` la app acepta:
+
+- **ALERT:** solo si `originNode` coincide con el nodo que envía el paquete. Marca el nodo con `isEmergency`, toma la posición del texto y la publica en `alerts`.
+- **RESOLVED:** con la misma regla de origen. Quita la marca y la alerta pasa a `status = resolved`.
+- **REPLAY:** una alerta guardada que reenvía otro nodo; se acepta, pero nunca cuenta como verificada.
+
+Además:
+
+- Una alerta (origen + id) se procesa una sola vez, aunque llegue por varios caminos.
+- Se ignoran las alertas caducadas, RECEIPT y FETCH (los gestiona el firmware), y todo lo que no es un EMG1 válido.
+- `isVerified` sale de `MeshPacket.xeddsa_signed`: el firmware verificó la firma del emisor. Una alerta sin firma verificada puede ser una suplantación.
+- En el chat cada SOS aparece como mensaje con `isSos` y un texto legible, con «no verificada» si no lo está.
 
 ### Para el firmware (Cristina)
 
-- Para cambiar la prioridad o el TTL que usa la app basta con cambiar las constantes de `SosPolicy`; no hay que tocar nada más de la app.
-- El firmware puede reconocer un SOS por el puerto `ALERT_APP` sin analizar el texto.
-- **Por confirmar:** hasta donde sabemos, la prioridad del paquete solo ordena la cola de envío del nodo emisor y **no viaja en la cabecera LoRa** del firmware estándar (la cabecera lleva destino, origen, id, `hop_limit`/`hop_start`, `want_ack` y canal). Si es así, los nodos intermedios no ven la prioridad y tendrían que identificar el SOS por el puerto para darle trato preferente.
+- Las constantes de `EmergencyPolicy` son lo único que hay que tocar para cambiar prioridad, TTL, gravedad o texto.
+- Hay que medir en la placa cuánto texto cabe con la firma; con coordenadas y «SOS», el EMG1 ocupa unos 40 bytes.
 
 ### Para el backend (Andrés)
 
-El SOS llega por el **puerto 11 (`ALERT_APP`)**, no por el 1 (`TEXT_MESSAGE_APP`). Si el backend solo procesa mensajes de texto, no verá los SOS enviados por la app. Con EMG1 pasaría al puerto 256 (`PRIVATE_APP`).
+El SOS llega por el **puerto 256 (`PRIVATE_APP`)** con la cabecera EMG1 de 20 bytes. Si el backend solo procesa mensajes de texto, no verá los SOS.
 
 ## 8. Limitaciones conocidas y pendiente
 
-- **Solo la pestaña Nodos usa datos reales.** El chat sigue con `MeshProvider`; el mapa, con su lista de nodos fija; la vista SOS, con su estado local.
+- **SOS:** si se cierra la app con un SOS activo, se pierde su id y ya no se puede cancelar desde la app. No se piden las alertas guardadas en el nodo (FETCH).
 - **Sin persistencia:** el historial del chat y la lista de nodos viven en memoria; se pierden al cerrar la app. Al volver a conectar, la lista de nodos se sustituye por la que envía el nodo.
 - **Sin reconexión automática:** si se pierde el enlace, el usuario tiene que volver a vincular desde la pestaña Nodos. Los mensajes que estaban en `transmitted` se quedan en ese estado.
 - **`isGateway`** sin implementar (siempre `false`).
@@ -352,8 +378,9 @@ flutter test
 
 | Fichero | Qué cubre |
 |---|---|
-| `test/data/meshtastic_client_test.dart` | `MeshtasticClient` contra un transporte de mentira: descarga de configuración (nodos, posición, batería, canales, canal deshabilitado oculto); fallo por `TimeoutException` si el nodo no completa la configuración; recepción de un texto (estado `ack`); `sendText` (paquete con `want_ack`, `hop_limit` del nodo, id casado con el acuse, estados `queued` → `transmitted` → `ack`); error de routing → `failed`; `sendSos`/`cancelSos` con `SosPolicy` y marca de emergencia; SOS recibido de otro nodo; envío sin conexión (`StateError`); pérdida del enlace. |
-| `test/data/sos_protocol_test.dart` | `SosCodec`: alerta con y sin GPS, cancelación y textos que no son SOS. |
-| `test/widget_test.dart` | La app arranca con `FakeMeshRepository` y `MeshProvider` y muestra las cuatro pestañas (necesita la fusión con `main`). |
+| `test/data/meshtastic_client_test.dart` | `MeshtasticClient` contra un transporte de mentira: descarga de configuración (nodos, posición, batería, canales, canal deshabilitado oculto); fallo por `TimeoutException` si el nodo no completa la configuración; recepción de un texto (estado `ack`); `sendText` (paquete con `want_ack`, `hop_limit` del nodo, id casado con el acuse, estados `queued` → `transmitted` → `ack`); error de routing → `failed`; SOS en EMG1 (ALERT con posición, RESOLVED con el mismo id, SOS activo tras reconectar); alertas recibidas (ALERT, RESOLVED, origen falso, repetidas, caducadas, datos que no son EMG1, sin firma y REPLAY); envío sin conexión (`StateError`); pérdida del enlace. |
+| `test/data/emergency_policy_test.dart` | `EmergencyText`: posición en el texto (escribir y leer, fuera de rango), tamaño dentro de EMG1 y texto legible para el chat. |
+| `test/emergency_codec_test.dart` | Códec EMG1 de Carlos con los vectores del firmware. |
+| `test/widget_test.dart` | La app arranca con `FakeMeshRepository` y muestra las cuatro pestañas. |
 
 Los tests no usan Bluetooth ni necesitan placa.

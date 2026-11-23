@@ -2,9 +2,10 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:zeroinfra/core/emergency_codec.dart';
 import 'package:zeroinfra/data/ble/mesh_transport.dart';
+import 'package:zeroinfra/data/meshtastic/emergency_policy.dart';
 import 'package:zeroinfra/data/meshtastic/meshtastic_client.dart';
-import 'package:zeroinfra/data/meshtastic/sos_protocol.dart';
 import 'package:zeroinfra/generated/meshtastic/channel.pb.dart' as pb;
 import 'package:zeroinfra/generated/meshtastic/config.pb.dart' as pb;
 import 'package:zeroinfra/generated/meshtastic/mesh.pb.dart' as pb;
@@ -12,6 +13,7 @@ import 'package:zeroinfra/generated/meshtastic/portnums.pbenum.dart' as pb;
 import 'package:zeroinfra/generated/meshtastic/telemetry.pb.dart' as pb;
 import 'package:zeroinfra/models/connection_status.dart';
 import 'package:zeroinfra/models/discovered_device.dart';
+import 'package:zeroinfra/models/emergency_alert.dart';
 import 'package:zeroinfra/models/mesh_message.dart';
 
 const int _me = 0x00000001;
@@ -112,6 +114,63 @@ pb.FromRadio routingPacket(int requestId, pb.Routing_Error error) {
         payload: pb.Routing(errorReason: error).writeToBuffer(),
       ),
     ),
+  );
+}
+
+pb.FromRadio positionPacket(int from, int latitudeI, int longitudeI) {
+  return pb.FromRadio(
+    packet: pb.MeshPacket(
+      from: from,
+      to: _broadcast,
+      id: 55,
+      decoded: pb.Data(
+        portnum: pb.PortNum.POSITION_APP,
+        payload: pb.Position(
+          latitudeI: latitudeI,
+          longitudeI: longitudeI,
+        ).writeToBuffer(),
+      ),
+    ),
+  );
+}
+
+// Un EMG1 que llega de la malla; [signed] es lo que pone el firmware en
+// xeddsa_signed tras verificar la firma.
+pb.FromRadio emgPacket(
+  EmgMessage emg, {
+  int from = _other,
+  int id = 90,
+  bool signed = true,
+}) {
+  return pb.FromRadio(
+    packet: pb.MeshPacket(
+      from: from,
+      to: _broadcast,
+      id: id,
+      xeddsaSigned: signed,
+      decoded: pb.Data(
+        portnum: pb.PortNum.PRIVATE_APP,
+        payload: EmgCodec.encode(emg),
+      ),
+    ),
+  );
+}
+
+EmgMessage emg(
+  EmgKind kind, {
+  int origin = _other,
+  int id = 1234,
+  int expiresUnix = 0,
+  String text = '@41.50000,2.50000 SOS',
+}) {
+  return EmgMessage(
+    kind: kind,
+    severity: 3,
+    flags: 0,
+    id: id,
+    expiresUnix: expiresUnix,
+    originNode: origin,
+    text: kind == EmgKind.resolved ? '' : text,
   );
 }
 
@@ -260,44 +319,161 @@ void main() {
     await sub.cancel();
   });
 
-  test('sendSos aplica SosPolicy y marca el nodo propio en emergencia',
-      () async {
+  test('sendSos difunde un EMG1 ALERT con la posición propia', () async {
     await client.connect('nodo');
+    transport.push(positionPacket(_me, 413887900, 21129600));
+    await settle();
 
     final sent = await client.sendSos();
     expect(sent.isSos, isTrue);
+    expect(sent.content, 'SOS · 41.38879, 2.11296');
 
     final packet = transport.written.last.packet;
     expect(packet.to, _broadcast);
-    expect(packet.decoded.portnum, SosPolicy.portNum);
-    expect(packet.priority, SosPolicy.priority);
-    expect(packet.hopLimit, SosPolicy.hopLimit);
+    expect(packet.channel, EmergencyPolicy.channel);
+    expect(packet.decoded.portnum, pb.PortNum.PRIVATE_APP);
+    expect(packet.priority, EmergencyPolicy.priority);
+    expect(packet.hopLimit, EmergencyPolicy.hopLimit);
 
-    final signal = SosCodec.tryDecode(utf8.decode(packet.decoded.payload))!;
-    expect(signal.kind, SosKind.alert);
-    expect(signal.nodeNum, _me);
+    final alert = EmgCodec.decode(packet.decoded.payload);
+    expect(alert.kind, EmgKind.alert);
+    expect(alert.originNode, _me);
+    expect(alert.id, isNot(0));
+    expect(alert.severity, EmergencyPolicy.severity);
+    expect(alert.flags, 0);
+    expect(alert.text, '@41.38879,2.11296 SOS');
     expect(client.nodes.firstWhere((n) => n.isMe).isEmergency, isTrue);
+  });
 
+  test('cancelSos envía RESOLVED con el id del SOS y no se repite',
+      () async {
+    await client.connect('nodo');
+    await client.sendSos();
+    final alertId =
+        EmgCodec.decode(transport.written.last.packet.decoded.payload).id;
+
+    await client.cancelSos();
+
+    final resolved =
+        EmgCodec.decode(transport.written.last.packet.decoded.payload);
+    expect(resolved.kind, EmgKind.resolved);
+    expect(resolved.id, alertId);
+    expect(resolved.originNode, _me);
+    expect(client.nodes.firstWhere((n) => n.isMe).isEmergency, isFalse);
+    // Ya no queda ningún SOS que cancelar.
+    await expectLater(client.cancelSos(), throwsStateError);
+  });
+
+  test('el SOS propio sigue activo tras reconectar con el mismo nodo',
+      () async {
+    await client.connect('nodo');
+    await client.sendSos();
+
+    transport.dropLink();
+    await client.connect('nodo');
+
+    expect(client.nodes.firstWhere((n) => n.isMe).isEmergency, isTrue);
     await client.cancelSos();
     expect(client.nodes.firstWhere((n) => n.isMe).isEmergency, isFalse);
   });
 
-  test('un SOS de otro nodo lo marca en emergencia con su posición',
-      () async {
+  test('un ALERT recibido marca el nodo y publica la alerta', () async {
     await client.connect('nodo');
-    const signal = SosSignal(
-      kind: SosKind.alert,
-      nodeNum: _other,
-      latitude: 41.5,
-      longitude: 2.5,
-    );
+    final alerts = <EmergencyAlert>[];
+    final messages = <MeshMessage>[];
+    final subs = [
+      client.alerts.listen(alerts.add),
+      client.messages.listen(messages.add),
+    ];
 
-    transport.push(textPacket(SosCodec.encode(signal)));
+    transport.push(emgPacket(emg(EmgKind.alert)));
     await settle();
 
     final other = client.nodes.firstWhere((n) => n.nodeNum == _other);
     expect(other.isEmergency, isTrue);
     expect(other.latitude, closeTo(41.5, 1e-6));
+    expect(other.longitude, closeTo(2.5, 1e-6));
+
+    final alert = alerts.single;
+    expect(alert.originNode, _other);
+    expect(alert.id, 1234);
+    expect(alert.text, 'SOS');
+    expect(alert.isVerified, isTrue);
+    expect(alert.latitude, closeTo(41.5, 1e-6));
+    expect(client.activeAlerts, [alert]);
+
+    expect(messages.single.isSos, isTrue);
+    expect(messages.single.content, 'SOS · 41.50000, 2.50000');
+    for (final sub in subs) {
+      await sub.cancel();
+    }
+  });
+
+  test('un RESOLVED cancela la alerta y quita la emergencia', () async {
+    await client.connect('nodo');
+    final alerts = <EmergencyAlert>[];
+    final sub = client.alerts.listen(alerts.add);
+
+    transport.push(emgPacket(emg(EmgKind.alert)));
+    transport.push(emgPacket(emg(EmgKind.resolved), id: 91));
+    await settle();
+
+    expect(client.activeAlerts, isEmpty);
+    expect(alerts.last.status, EmergencyDeliveryStatus.resolved);
+    final other = client.nodes.firstWhere((n) => n.nodeNum == _other);
+    expect(other.isEmergency, isFalse);
+    await sub.cancel();
+  });
+
+  test('se descartan origen falso, repetidos, caducados y no EMG1',
+      () async {
+    await client.connect('nodo');
+    final alerts = <EmergencyAlert>[];
+    final sub = client.alerts.listen(alerts.add);
+
+    // El paquete lo envía 0x03, pero dice venir de _other.
+    transport.push(emgPacket(emg(EmgKind.alert, id: 1), from: 0x03));
+    // La misma alerta por dos caminos (dos paquetes distintos).
+    transport.push(emgPacket(emg(EmgKind.alert, id: 2), id: 100));
+    transport.push(emgPacket(emg(EmgKind.alert, id: 2), id: 101));
+    // Caducó en 1970.
+    transport.push(emgPacket(emg(EmgKind.alert, id: 3, expiresUnix: 1)));
+    // Bytes por PRIVATE_APP que no son EMG1.
+    transport.push(
+      pb.FromRadio(
+        packet: pb.MeshPacket(
+          from: _other,
+          to: _broadcast,
+          decoded: pb.Data(
+            portnum: pb.PortNum.PRIVATE_APP,
+            payload: [1, 2, 3],
+          ),
+        ),
+      ),
+    );
+    await settle();
+
+    expect(alerts.map((a) => a.id), [2]);
+    expect(client.activeAlerts, hasLength(1));
+    await sub.cancel();
+  });
+
+  test('sin firma verificada la alerta queda como no verificada', () async {
+    await client.connect('nodo');
+    final messages = <MeshMessage>[];
+    final sub = client.messages.listen(messages.add);
+
+    transport.push(emgPacket(emg(EmgKind.alert), signed: false));
+    // Un REPLAY lo reenvía otro nodo: tampoco cuenta como verificado.
+    transport.push(
+      emgPacket(emg(EmgKind.replay, origin: 0x09, id: 7), id: 92),
+    );
+    await settle();
+
+    expect(client.activeAlerts.map((a) => a.isVerified), [false, false]);
+    expect(client.activeAlerts.last.isReplay, isTrue);
+    expect(messages.first.content, contains('no verificada'));
+    await sub.cancel();
   });
 
   test('sin conexión no se puede enviar', () {

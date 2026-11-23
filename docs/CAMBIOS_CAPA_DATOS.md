@@ -1,23 +1,22 @@
-# Capa de datos Meshtastic: qué se ha cambiado y por qué
+# Capa de datos Meshtastic: diseño y decisiones
 
-Documento de revisión de la rama `rama-SHIQI` (15 y 16 de noviembre). Explica cada pieza nueva o modificada de la app, qué hace y por qué está hecha así, para poder revisarla, defenderla y fusionarla. La guía de uso para las vistas está en [`APP_CAPA_DATOS.md`](APP_CAPA_DATOS.md).
+Explica la capa de datos de la app móvil pieza a pieza: qué hace cada una y por qué está hecha así. La guía de uso para las vistas está en [`APP_CAPA_DATOS.md`](APP_CAPA_DATOS.md).
 
 ---
 
-## 1. Resumen y estado
+## 1. Resumen
 
-- La app ya tiene una capa de datos completa entre las vistas y el nodo Meshtastic: un contrato (`MeshRepository`), una implementación real que habla Protobuf con el nodo por BLE (`MeshtasticClient` sobre `BleMeshTransport` y `MeshtasticBleService`) y una simulada (`FakeMeshRepository`).
-- Cuatro providers (`ConnectionProvider`, `NodesProvider`, `ChatProvider`, `SosProvider`) exponen ese estado a las vistas. Solo la pestaña Nodos los usa de momento.
-- Los modelos `MeshMessage` y `MeshNode` son los de Carlos ampliados con campos opcionales; su `MeshProvider` simulado y su chat siguen funcionando sin cambios.
-- Se han aplicado las correcciones pendientes de `meshtastic_ble_service.dart` y `permission_service.dart`.
-- El SOS sigue con el formato provisional (`SOS|v1|...` por `ALERT_APP`); el paso a EMG1 queda para cuando el firmware de Cristina esté cerrado (sección 5).
+- La app tiene una capa de datos completa entre las vistas y el nodo Meshtastic. Se compone de:
+    - un contrato, `MeshRepository`;
+    - una implementación real que habla Protobuf con el nodo por BLE: `MeshtasticClient`, sobre `BleMeshTransport` y `MeshtasticBleService`;
+    - una implementación simulada, `FakeMeshRepository`.
+- Cuatro providers (`ConnectionProvider`, `NodesProvider`, `ChatProvider` y `SosProvider`) exponen ese estado a las cuatro pestañas de la app.
+- Los modelos `MeshMessage`, `MeshNode` y `EmergencyAlert` parten de los que definió la interfaz y se amplían con campos opcionales (sección 3.8).
+- El SOS viaja en EMG1, el formato de alertas del firmware del proyecto, por `PRIVATE_APP` (256) (sección 4).
 
-**Estado: compilado y probado en el ordenador, pendiente de prueba real con la placa.** Tras fusionar `origin/main` en `rama-SHIQI` (sección 4):
-
-- `flutter doctor` y `flutter analyze`: sin errores ni warnings. Solo quedan avisos de estilo (`info`) por `withOpacity` en `lib/views/map/map_view.dart`, que es código de Carlos.
-- `flutter test`: pasan los 20 tests (los 14 de la capa de datos y los 6 del códec EMG1 de Carlos).
-
-Los tests usan un nodo simulado (`FakeTransport`, sección 3.12), así que comprueban la lógica del protocolo pero no el Bluetooth ni el firmware. Primera prueba con la placa (18/11, Samsung SM-A346B): conecta, descubre las características, se suscribe a `fromNum` y descarga la configuración del nodo. La primera vinculación fallaba por el emparejamiento con PIN; se ha corregido (sección 3.10). Falta comprobar en pantalla la lista de nodos y el envío y la recepción de mensajes.
+**Validación:**
+- **Tests:** `flutter analyze` sin errores y 25 tests automáticos que pasan (sección 3.12). Usan un nodo simulado (`FakeTransport`), así que comprueban la lógica del protocolo, pero no el Bluetooth ni el firmware.
+- **Con una placa real** (Samsung SM-A346B y una T-Beam): la app conecta, empareja con PIN, descubre las características, se suscribe a `fromNum` y descarga la configuración del nodo.
 
 ## 2. Mapa de capas y ficheros
 
@@ -34,8 +33,9 @@ Rutas relativas a `app/`. «Nuevo» incluye los ficheros que en la última versi
 | Fichero | Estado | Qué es |
 |---|---|---|
 | `lib/data/mesh_repository.dart` | Nuevo | Contrato `MeshRepository` y excepción `MeshPermissionException`. |
-| `lib/data/meshtastic/meshtastic_client.dart` | Nuevo | `MeshtasticClient`: protocolo `ToRadio`/`FromRadio`, nodos, canales, texto con acuses, SOS. |
-| `lib/data/meshtastic/sos_protocol.dart` | Nuevo | `SosPolicy` y `SosCodec`: formato y política del SOS provisional. |
+| `lib/data/meshtastic/meshtastic_client.dart` | Nuevo | `MeshtasticClient`: protocolo `ToRadio`/`FromRadio`, nodos, canales, texto con acuses, SOS y alertas EMG1. |
+| `lib/data/meshtastic/emergency_policy.dart` | Nuevo (23/11) | `EmergencyPolicy` y `EmergencyText`: política del SOS en EMG1 y posición en el texto. Sustituye a `sos_protocol.dart`, que se borra. |
+| `lib/models/emergency_alert.dart` | Modificado (23/11) | Modelo de Carlos con tres campos opcionales: `latitude`, `longitude` e `isVerified`. |
 | `lib/data/ble/mesh_transport.dart` | Nuevo | Interfaz `MeshTransport`: bytes de entrada y salida. |
 | `lib/data/ble/ble_mesh_transport.dart` | Nuevo | `BleMeshTransport`: adapta `MeshtasticBleService` a `MeshTransport` y pide permisos. |
 | `lib/data/ble/meshtastic_ble_service.dart` | Modificado | Correcciones de conexión y de vaciado de `fromRadio` (sección 3.10). |
@@ -49,12 +49,12 @@ Rutas relativas a `app/`. «Nuevo» incluye los ficheros que en la última versi
 | `lib/providers/{connection,nodes,chat}_provider.dart` | Nuevo | Estado de las vistas Nodos, Mapa y Chat. |
 | `lib/providers/sos_provider.dart` | Nuevo | Estado de la vista SOS. |
 | `lib/views/nodes/nodes_view.dart` | Modificado | Pestaña Nodos conectada a los providers (escaneo, conexión, lista de nodos). |
-| `lib/main.dart` | Modificado | Envuelve la app en `AppProviders`, por fuera del `MeshProvider` de Carlos. |
+| `lib/main.dart` | Modificado | Envuelve la app en `AppProviders`, que registra el repositorio y los providers. |
 | `lib/generated/meshtastic/atak.pbenum.dart` | Nuevo | Enums `Team` y `MemberRole` que importa `module_config.pb.dart` (sección 3.11). |
 | `pubspec.yaml` | Modificado | `protobuf` ^6.1.0 y `device_info_plus` ^11.0.0. |
 | `android/app/src/main/AndroidManifest.xml` | Modificado | `BLUETOOTH` y `BLUETOOTH_ADMIN` limitados a `maxSdkVersion="30"`. |
 | `.gitignore` | Modificado | Ignora `/android/build/`. |
-| `test/data/meshtastic_client_test.dart`, `sos_protocol_test.dart` | Nuevo | Tests del cliente y del códec SOS. |
+| `test/data/meshtastic_client_test.dart`, `emergency_policy_test.dart` | Nuevo | Tests del cliente y de `EmergencyText`. `sos_protocol_test.dart` se borra. |
 | `test/widget_test.dart` | Nuevo | La app arranca con la malla simulada. |
 
 ## 3. Pieza por pieza
@@ -120,7 +120,7 @@ Hay dos implementaciones: `MeshtasticClient` (nodo real) y `FakeMeshRepository` 
 
 ### 3.4 `hop_limit` siempre explícito
 
-Cada paquete se envía con `hop_limit` fijado: el que informa el nodo en `config.lora.hop_limit` (si es mayor que 0) o `defaultHopLimit = 3`. El SOS usa `SosPolicy.hopLimit = 7`. Un `MeshPacket` con `hop_limit` 0 (el valor por defecto de Protobuf si no se rellena) solo llega a los vecinos directos, así que nunca se deja sin fijar. El test de `sendText` comprueba que se usa el 5 que envía la configuración de prueba.
+Cada paquete se envía con `hop_limit` fijado: el que informa el nodo en `config.lora.hop_limit` (si es mayor que 0) o `defaultHopLimit = 3`. El SOS usa `EmergencyPolicy.hopLimit = 7`. Un `MeshPacket` con `hop_limit` 0 (el valor por defecto de Protobuf si no se rellena) solo llega a los vecinos directos, así que nunca se deja sin fijar. El test de `sendText` comprueba que se usa el 5 que envía la configuración de prueba.
 
 ### 3.5 Envío de texto, id de paquete y estados de entrega
 
@@ -162,24 +162,24 @@ Cada paquete se envía con `hop_limit` fijado: el que informa el nodo en `config
 
 - Si viene de otro nodo, actualiza su SNR (si no es 0) y su `lastHeard`.
 - Sin `decoded` (cifrado con una clave que el nodo no tiene) no se procesa más.
-- Según el puerto: `ROUTING_APP` → acuses; `POSITION_APP` → posición (0,0 significa «sin posición»); `NODEINFO_APP` → nombres; `TELEMETRY_APP` → batería (limitada a 0-100; Meshtastic usa valores mayores de 100 para «alimentado por cable»); `TEXT_MESSAGE_APP` y `ALERT_APP` → `_onText`. Cualquier otro puerto se ignora.
-- `_onText` emite un `MeshMessage` en `ack`. Si el texto es un SOS (`SosCodec.tryDecode`), marca el nodo **remitente del paquete** en emergencia (no el id escrito en el texto) y actualiza su posición si la trae.
+- Según el puerto: `ROUTING_APP` → acuses; `POSITION_APP` → posición (0,0 significa «sin posición»); `NODEINFO_APP` → nombres; `TELEMETRY_APP` → batería (limitada a 0-100; Meshtastic usa valores mayores de 100 para «alimentado por cable»); `TEXT_MESSAGE_APP` → mensaje de texto; `PRIVATE_APP` → `_onEmergency` (sección 4). Cualquier otro puerto se ignora.
+- `_emitReceived` publica el `MeshMessage` en `ack`, tanto para un texto como para un SOS (en ese caso, con `isSos` y un texto legible).
 
 ### 3.7 `PortNum` con `if/else` y Protobuf con prefijo `pb`
 
 - `_dispatch` usa `switch` sobre `FromRadio_PayloadVariant`, que en el código generado es un `enum` de Dart. `PortNum`, en cambio, no es un `enum`: es una clase (`extends ProtobufEnum`) con constantes estáticas. Un `switch` sobre ella no puede comprobar que se cubren todos los casos y la comparación por patrón constante depende de cómo esa clase define la igualdad; con `if/else` y `==` el comportamiento queda explícito. (Este motivo no está comentado en el código.)
 - Los ficheros generados se importan todos con el mismo prefijo `pb` (`channel.pb.dart`, `mesh.pb.dart`, `portnums.pbenum.dart`, `telemetry.pb.dart`). Las clases generadas tienen nombres genéricos (`Position`, `Data`, `Channel`, `Config`, `User`, `Constants`, `Telemetry`) que se confundirían con los modelos de la app o con clases de otros paquetes. Con el prefijo, cada línea deja claro qué es formato de red (`pb.Channel`) y qué es modelo de la app (`MeshChannel`). `mesh.pb.dart` reexporta `mesh.pbenum.dart`, por eso `pb.MeshPacket_Priority` y `pb.Constants` funcionan con el mismo prefijo.
 
-### 3.8 Modelos: ampliación de los de Carlos
+### 3.8 Modelos: ampliación de los de la interfaz
 
-**Qué se ha hecho.** El 15 de noviembre Carlos subió a `main` su `MeshProvider` simulado y cambió `MeshMessage` (id de texto, `recipientId`, `status` mutable con `queued/transmitted/ack/failed`); su chat ya los usa. Los modelos de Shiqi eran distintos y chocaban. Se han rehecho como **ampliación**: se conservan los campos, tipos, constructor y estados de Carlos y se añaden campos opcionales con valor por defecto.
+**Qué se ha hecho.** La interfaz (Carlos) y la capa de datos (Shiqi) se desarrollaron en paralelo, y cada una definió al principio sus propios modelos. La interfaz ya pintaba `MeshMessage` con id de texto, `recipientId` y `status` mutable (`queued/transmitted/ack/failed`). En vez de sustituirlos, los modelos se han rehecho como **ampliación**: se conservan los campos, tipos, constructor y estados de la interfaz y se añaden campos opcionales con valor por defecto.
 
 | Modelo | De Carlos (sin cambios) | Añadido |
 |---|---|---|
 | `MeshMessage` | `id`, `senderId`, `senderName`, `recipientId`, `content`, `timestamp`, `isMe`, `status` (mutable), `isDirect`, `isEmergency` | `packetId`, `senderNum`, `recipientNum`, `channel`, `isSos`, `broadcastId`, `copyWith({status})`; `isEmergency` también es true con `isSos` |
 | `MeshNode` | `id`, `name`, `latitude`, `longitude`, `batteryLevel`, `snr`, `isGateway`, `isEmergency`, `lastHeard` | `nodeNum`, `shortName`, `hopsAway`, `isMe`, `hasPosition`, `hasBattery`, `neverHeard`, `MeshNode.unknown`, `idFromNum`, `copyWith` |
 
-**Por qué.** Así el `MeshProvider` y el chat de Carlos compilan sin tocarlos, y los providers reales producen objetos del mismo tipo que él ya pinta. El día que su chat pase a datos reales no tendrá que cambiar de modelo.
+**Por qué.** Así las vistas siguieron compilando sin tocarlas mientras se desarrollaba la capa de datos, y los providers reales producen objetos del mismo tipo que las vistas ya pintaban. Cuando las vistas pasaron a datos reales, no tuvieron que cambiar de modelo.
 
 **Coste.** Los campos de Carlos no admiten null, así que «no hay dato» se expresa de otra forma:
 
@@ -249,9 +249,7 @@ En el manifiesto, `BLUETOOTH` y `BLUETOOTH_ADMIN` llevan ahora `maxSdkVersion="3
 - `protobuf: ^6.1.0` (antes ^3.1.0). El código de `lib/generated/` sale de `protoc_plugin` 25.1.0, que exige `package:protobuf` 6.1.0 o superior; con la 3.1.0 no compila (ver `docs/PROTOBUF.md`).
 - `device_info_plus: ^11.0.0`, para leer la versión de Android en `PermissionService`.
 
-El `pubspec.lock` de `main` (subido por Carlos) fija `protobuf` 3.1.0 y no tiene `device_info_plus`. `flutter pub get` tras la fusión lo actualizará; hay que confirmar ese cambio.
-
-**`atak.pbenum.dart`.** `module_config.pb.dart` importa `atak.pbenum.dart`, que no se había generado aunque `protos/meshtastic/atak.proto` sí estaba en el repositorio. `flutter analyze` no lo detectaba porque `analysis_options.yaml` excluye `lib/generated/`; los tests no compilaban. Se ha añadido una versión parcial escrita a mano, con el formato de `protoc_plugin` 25.1.0, que solo contiene los dos enums que se usan (`Team` y `MemberRole`). Al regenerar con el comando de `docs/PROTOBUF.md` se sustituye por la completa.
+**`atak.pbenum.dart`.** `module_config.pb.dart` importa `atak.pbenum.dart`, que no se había generado aunque `protos/meshtastic/atak.proto` sí estaba en el repositorio. `flutter analyze` no lo detectaba porque `analysis_options.yaml` excluye `lib/generated/`; los tests no compilaban. Se ha regenerado con el comando de `docs/PROTOBUF.md`, que ahora incluye `atak.proto` y `field_metadata.proto`.
 
 ### 3.12 Tests
 
@@ -272,120 +270,69 @@ La configuración de prueba: nodo propio `1` (sin posición), vecino `2` («Veci
 | `un texto de otro nodo se publica como mensaje recibido` | Contenido, `senderNum`, `senderName`, difusión (`recipientId == broadcastId`), estado `ack`. |
 | `sendText escribe el paquete y sigue su entrega hasta el acuse` | Devuelve `transmitted`; paquete en difusión, `want_ack`, `hop_limit` 5, puerto de texto, id igual a `packetId`; tras el acuse: `queued`, `transmitted`, `ack`. |
 | `un error de routing marca el mensaje como fallido` | Directo + `MAX_RETRANSMIT` → `failed`. |
-| `sendSos aplica SosPolicy y marca el nodo propio en emergencia` | Puerto, prioridad y `hop_limit` de `SosPolicy`; texto decodificable; `isEmergency` del nodo propio a true y, tras `cancelSos`, a false. |
-| `un SOS de otro nodo lo marca en emergencia con su posición` | `isEmergency` y latitud del remitente. |
+| `sendSos difunde un EMG1 ALERT con la posición propia` | Difusión por el canal 0, `PRIVATE_APP`, prioridad y `hop_limit` de `EmergencyPolicy`; cabecera EMG1 (ALERT, origen propio, id distinto de 0, gravedad 3, flags 0); texto `@41.38879,2.11296 SOS`; nodo propio en emergencia. |
+| `cancelSos envía RESOLVED con el id del SOS y no se repite` | RESOLVED con el mismo id y origen; quita la emergencia; un segundo `cancelSos` lanza `StateError`. |
+| `el SOS propio sigue activo tras reconectar con el mismo nodo` | Tras perder el enlace y reconectar, el nodo propio sigue en emergencia y se puede cancelar. |
+| `un ALERT recibido marca el nodo y publica la alerta` | Emergencia y posición del nodo; alerta con texto, `isVerified` y posición; `activeAlerts`; mensaje legible en el chat. |
+| `un RESOLVED cancela la alerta y quita la emergencia` | `activeAlerts` vacío, `status` resuelta y nodo sin emergencia. |
+| `se descartan origen falso, repetidos, caducados y no EMG1` | De cinco paquetes solo cuenta una alerta. |
+| `sin firma verificada la alerta queda como no verificada` | `isVerified` false sin firma y en un REPLAY; «no verificada» en el chat. |
 | `sin conexión no se puede enviar` | `StateError`. |
 | `al perderse el enlace el cliente queda desconectado` | Estado `disconnected` y `sendText` lanza `StateError`. |
 
-`test/data/sos_protocol_test.dart`: alerta con posición (codifica y decodifica), alerta sin GPS (`SOS|v1|!00000001||`), cancelación, y textos que no son SOS (versión distinta, id sin `!`).
+`test/data/emergency_policy_test.dart`: posición en el texto (con y sin GPS, lectura, fuera de rango, mal formada), que el texto quepa en EMG1 y vuelva igual, y el texto legible del chat.
 
-`test/widget_test.dart`: la app arranca con `FakeMeshRepository` y el `MeshProvider` de Carlos y muestra las cuatro pestañas. Necesita la fusión.
+`test/widget_test.dart`: la app arranca con `FakeMeshRepository` y muestra las cuatro pestañas.
 
 **No cubierto por tests:** la regla del acuse implícito en directos, `queue_status`, el límite de 100 acuses, el de 233 bytes, el paso a `failed` de los mensajes en `queued` al perder el enlace, un error de lectura durante la descarga, `BleMeshTransport`, `MeshtasticBleService`, `PermissionService` y los providers.
 
-## 4. Convivencia con el código de Carlos y fusión
+## 4. SOS y EMG1
 
-### Situación
+Desde el 23/11 el SOS viaja en **EMG1**, el formato binario del firmware de Cristina (`EmergencyWire.h`). Su firmware solo trata un paquete como alerta, y le da prioridad en cada salto, si es un EMG1 ALERT por `PRIVATE_APP` (256), con `originNode` igual al emisor y con la firma verificada. El SOS provisional (`SOS|v1|...` por `ALERT_APP`) no cumplía nada de eso.
 
-- `main.dart` registra `AppProviders` (capa real) por fuera del `ChangeNotifierProvider(MeshProvider)` de Carlos. Los dos conviven.
-- Solo la pestaña Nodos usa datos reales. El chat de Carlos usa su `MeshProvider` simulado. En el código de `main`, el mapa pinta una lista de nodos fija dentro de `map_view.dart` y la vista SOS guarda su propio estado local; ninguno de los dos lee todavía un provider.
+### Ficheros
 
-### Cómo fusionar
+- `lib/core/emergency_codec.dart` (Carlos): códec EMG1. Coincide byte a byte con `EmergencyWire.h` y se usa sin cambios.
+- `lib/data/meshtastic/emergency_policy.dart`: `EmergencyPolicy` (puerto, prioridad, saltos, canal, gravedad 3, sin caducidad, texto `SOS`) y `EmergencyText` (posición en el texto y texto legible para el chat).
+- `lib/models/emergency_alert.dart` (Carlos): se añaden `latitude`, `longitude` e `isVerified`, opcionales.
+- `sos_protocol.dart` y `sos_protocol_test.dart` se borran.
 
-En el repositorio del equipo, en `rama-SHIQI` y con `origin/main` actualizado (`git fetch origin`):
+### Envío
 
-```bash
-git add -A
-git commit -m "Capa de datos Meshtastic: repositorio, cliente, providers y tests"
-git merge origin/main
-git checkout --ours app/lib/main.dart app/lib/models/mesh_message.dart
-git add app/lib/main.dart app/lib/models/mesh_message.dart
-git commit
-cd app && flutter pub get && flutter analyze && flutter test
-```
+- `sendSos` difunde un ALERT con `originNode = myNodeNum`, un `id` aleatorio distinto de 0, gravedad 3, `flags = 0` y el texto `@lat,lon SOS` (o `SOS` sin GPS). **Por qué en difusión:** Meshtastic solo firma las difusiones, y sin firma los retransmisores no dan prioridad.
+- **Por qué un id nuevo en cada SOS:** el firmware descarta durante una hora un (origen, id) que ya ha visto.
+- `cancelSos` difunde un RESOLVED con el mismo `id`, así que el cliente recuerda el SOS activo (`_ownSos`). Se conserva tras reconectar con el mismo nodo; con otro nodo se olvida, porque el firmware solo acepta el RESOLVED del mismo origen. Sin SOS activo, `cancelSos` lanza `StateError`.
+- `_send` acepta ahora bytes (`payload`) y, aparte, el texto que se muestra en el chat (`content`).
+- **Por qué la posición va en el texto:** EMG1 no tiene campos de posición. Con 5 decimales (≈ 1 m) el EMG1 ocupa unos 40 bytes, para que quepa la firma.
 
-- La fusión da conflicto de texto en `app/lib/main.dart` y `app/lib/models/mesh_message.dart`. La versión de `rama-SHIQI` de ambos ya incluye lo de Carlos (su `MeshProvider` en `main.dart`; sus campos y estados en `MeshMessage`), así que se resuelven quedándose con la propia: durante un `merge`, `--ours` es la rama en la que se está.
-- `pubspec.yaml` se fusiona solo.
-- La fusión ya está hecha en `rama-SHIQI`. Antes de ella la rama no compilaba sola, porque `main.dart` y `test/widget_test.dart` importan `services/mesh_provider.dart`, que solo existía en `main`. Falta llevar `rama-SHIQI` a `main` con una pull request.
-- Tras `flutter pub get`, confirmar también el `pubspec.lock` actualizado (sección 3.11).
+### Recepción (`_onEmergency`)
 
-### Qué tiene que hacer Carlos para que su chat use datos reales
+- **Validación:** se descartan los paquetes propios y lo que `EmgCodec.decode` no acepta.
+- **ALERT:** solo si `originNode == packet.from` (la misma regla que el firmware). Marca el nodo en emergencia con la posición del texto, crea un `EmergencyAlert` y lo emite por `alerts` y, como mensaje con `isSos`, por `messages`.
+- **REPLAY:** una alerta guardada que reenvía otro nodo; no exige esa regla, pero nunca cuenta como verificada, porque la firma es la de quien la reenvía.
+- **RESOLVED:** con la misma regla de origen, quita la alerta de `activeAlerts`, la marca `resolved` y quita la emergencia del nodo si no le queda otra alerta.
+- **Duplicados:** cada (origen, id) se procesa una vez (`_seenAlerts`, hasta 200). Un RESOLVED que llega antes que su ALERT hace que el ALERT se descarte después.
+- **Sin procesar:** las alertas caducadas (`expiresUnix` en el pasado) se ignoran, y RECEIPT y FETCH los gestiona el firmware.
+- **`isVerified` = `MeshPacket.xeddsa_signed`:** lo pone el firmware tras verificar la firma; ya estaba en nuestros `.proto`.
+- **Reconexión:** las alertas activas se conservan y, como la descarga vacía los nodos, se vuelven a marcar.
 
-Los modelos ya son los mismos, así que el cambio está en de dónde salen los datos. Su `MeshProvider` tiene que dejar de generarlos y delegar en `MeshRepository` y los providers. Correspondencia:
+### Interfaz nueva
 
-| `MeshProvider` (Carlos) | Equivalente real | Nota |
-|---|---|---|
-| `nodes` | `NodesProvider.nodes` | |
-| `connectedNodeId`, `connectedNode` | `NodesProvider.me?.id`, `NodesProvider.me` | |
-| `messages` | `ChatProvider.messages` | |
-| `getMessagesForChannel(null / 'broadcast')` | `ChatProvider.broadcastMessages(0)` | Los SOS reales son difusiones por el canal 0 con `isSos`, así que ya aparecen ahí. |
-| `getMessagesForChannel(nodeId)` | `ChatProvider.directMessages(nodeNum)` | `nodeNum` del nodo con ese `id` en `NodesProvider.nodes`. |
-| `sendMessage(text, recipientId:)` | `ChatProvider.sendText(text, toNode: nodeNum)` | `toNode` null = difusión. Devuelve `false` con el motivo en `errorMessage`. |
-| `simulateIncomingMessage` | — | Con `FAKE_MESH=true`, `FakeMeshRepository` genera una difusión cada 20 s. |
-| `triggerSos()`, `cancelSos()`, `isEmergencyActive` | `SosProvider.send()`, `cancel()`, `isActive` | |
-| `isScanning`, `startScan()`, `stopScan()` | `ConnectionProvider.isScanning`, `startScan()`, `stopScan()` | |
-| `connectToNode(nodeId)`, `disconnectNode()` | `ConnectionProvider.connect(DiscoveredDevice)`, `disconnect()` | Se conecta a un dispositivo BLE del escaneo, no a un nodo de la malla. |
+- `MeshRepository.alerts` (`Stream<EmergencyAlert>`) y `MeshRepository.activeAlerts`.
+- `SosProvider.alerts`: las alertas activas de otros nodos, para la vista SOS.
+- `sendSos` y `cancelSos` mantienen la firma; la vista SOS de Carlos no cambia.
+- **Simulación:** `FakeMeshRepository` envía un SOS verificado a los 30 s, que se cancela 60 s después, y uno sin verificar a los 45 s.
 
-Alternativa más directa: que `chat_view.dart` lea `ChatProvider` y `NodesProvider` con `context.watch` y deje `MeshProvider` solo para la simulación. Lo deciden Carlos y Shiqi.
+### Pendiente
 
-Dos detalles de su chat a revisar con él: el texto de ayuda de `ack` dice «ACK confirmado por el receptor», pero en difusión `ack` significa que algún nodo lo retransmitió; y el de `transmitted` dice «Emitido por radio LoRa», pero solo indica que el nodo lo aceptó por BLE.
+- Probar con dos placas con el firmware de Cristina: que el SOS aparezca como `EMG_APP_RX` en el receptor y, en un retransmisor, `EMG_RELAY_PRIORITY`.
+- Medir el tamaño máximo del texto con la firma.
+- Si la app se cierra con un SOS activo, se pierde su id y no se puede cancelar desde la app.
+- No se piden las alertas guardadas en el nodo (FETCH) al conectar.
 
-## 5. SOS y EMG1
-
-### Hoy (provisional)
-
-Todo lo que distingue un SOS está en `lib/data/meshtastic/sos_protocol.dart`:
-
-- `SosPolicy`: puerto `ALERT_APP` (11), prioridad `ALERT`, `hop_limit` 7, canal 0. Un solo paquete por SOS, en difusión y con `want_ack`.
-- `SosCodec`: texto `SOS|v1|!a1b2c3d4|lat|lon` (5 decimales; vacíos sin GPS) o `SOS|v1|!a1b2c3d4|CANCEL`.
-- Al recibir, se acepta por `ALERT_APP` o `TEXT_MESSAGE_APP`; se marca al remitente del paquete con `isEmergency`, se actualiza su posición y el mensaje aparece en el chat con `isSos`.
-
-Shiqi ha decidido no tocarlo hasta que el firmware esté cerrado.
-
-### Propuesta de Cristina (EMG1)
-
-Formato binario propio dentro de `Data.payload`, por `PRIVATE_APP` (256):
-
-- Cabecera de 20 bytes: `EMG1`, versión 1, `kind`, `severity` (0-3), `flags` (bit 0: pedir recibo en una ALERT unicast), `id` (uint32), `expiresUnix` (uint32), `originNode` (uint32); enteros en little-endian. Después, texto UTF-8 de hasta 160 bytes (total ≤ 180, por debajo de los 233 de Meshtastic).
-- Tipos: `ALERT` (1), `RECEIPT` (2), `RESOLVED` (3), `FETCH` (4), `REPLAY` (5).
-- Una alerta se identifica por `(originNode, id)`, no por el id del paquete Meshtastic.
-- El firmware pone prioridad `ALERT` al reconocer EMG1 en el envío local; no se transmite a los retransmisores.
-
-Su firmware (Meshtastic 2.8.2 modificado) no es definitivo: las pruebas están previstas para el miércoles y todavía no ha conseguido la retransmisión.
-
-### Qué habrá que cambiar en la app cuando el firmware esté cerrado
-
-| Fichero | Cambio |
-|---|---|
-| Nuevo `lib/data/meshtastic/emg1_codec.dart` (Cristina propone `lib/core/emergency_codec.dart`; decidir la ruta) | Códec binario EMG1 con las validaciones de su documento. Se puede partir de su `EmgCodec`. |
-| Nuevo `test/data/emg1_codec_test.dart` | Los cinco vectores hexadecimales de su documento (ALERT, RECEIPT, FETCH, RESOLVED, REPLAY), más longitudes inválidas, texto con acentos y tipos sin texto. |
-| `meshtastic_client.dart`, `_onMeshPacket` | Nueva rama `else if (port == pb.PortNum.PRIVATE_APP)`: decodificar con `try/catch FormatException`. Hoy ese puerto se ignora (solo actualiza SNR y `lastHeard` del remitente). |
-| `meshtastic_client.dart`, `_send` | Aceptar un payload en bytes además de texto (hoy codifica siempre `String` en UTF-8). |
-| `meshtastic_client.dart`, `_sendSos` | `sendSos` → `ALERT` con `originNode = myNodeNum` e `id` nuevo (uint32 no nulo); `cancelSos` → `RESOLVED` con el mismo `(originNode, id)`, así que hay que recordar la última alerta propia. Revisar si se sigue fijando `priority` (lo hace el firmware) y si `want_ack` tiene sentido en difusión. |
-| `mesh_repository.dart`, `fake_mesh_repository.dart` | Stream de alertas y, si se acuerda, parámetros de `sendSos` (gravedad, texto). La simulación tiene que implementarlos también. |
-| Nuevo `lib/models/emergency_alert.dart` | Modelo de alerta con clave `(originNode, id)` y los campos de su tabla (`severity`, `text`, `expiresUnix`, `senderNode`, `destinationNode`, `channel`, `meshPacketId`, `receivedAt`, estado, `isReplay`). |
-| `sos_provider.dart` | Lista de alertas, deduplicación por `(originNode, id)`, estado resuelta, `RECEIPT`. `isActive` dejaría de salir de `MeshNode.isEmergency`. |
-| `sos_protocol.dart`, `sos_protocol_test.dart`, rama SOS de `_onText` | Retirarlos. `ALERT_APP` dejaría de usarse para el SOS. |
-| `meshtastic_client_test.dart` | Adaptar los dos tests de SOS. |
-| `docs/APP_CAPA_DATOS.md`, `docs/BLE_MESHTASTIC.md` | Actualizar la sección SOS y la tabla de puertos. Avisar a Andrés: el SOS pasaría del puerto 11 al 256. |
-
-### Dudas que salen de su documento (para preguntarle)
-
-1. **Versión de firmware y de `.proto`.** Las placas llevarían Meshtastic 2.8.2 modificado, pero `app/lib/generated/` se generó con los `.proto` de 2.7.26 (`docs/PROTOBUF.md`). ¿Se regeneran o se confirma que `ToRadio`/`FromRadio` son compatibles?
-2. **Nodos autorizados.** `EMERGENCY_AUTHORIZED_ORIGINS` (en `EmergencyConfig.h`) es una lista por número de nodo. ¿Qué números de nodo se incluyen? Cada T-Beam conectada a un móvil tiene que estar para que sus alertas se procesen.
-3. **`expiresUnix`.** ¿0 (sin caducidad absoluta) u hora del móvil más un margen? El firmware aplica además una ventana nominal de una hora desde la recepción.
-4. **Posición.** EMG1 no tiene campo de posición y el SOS actual la lleva. ¿Va en el texto, en un paquete `POSITION_APP` aparte o se usa la última posición conocida del nodo?
-5. **Gravedad y texto del botón SOS.** Qué `severity` (1-3) y qué texto envía el botón.
-6. **Destino, canal y acuse.** ¿Siempre difusión por el canal 0? En difusión no hay `RECEIPT`; ¿se mantiene `want_ack`? ¿Se mantiene `hop_limit` 7?
-7. **`RESOLVED`** solo lo acepta el firmware si `originNode` coincide con el remitente: la cancelación tiene que salir del mismo nodo que envió la alerta.
-8. **`FETCH`/`REPLAY`.** ¿Cuándo debe pedir la app las alertas almacenadas (al conectar, a mano)? El nodo guarda 8 en RAM y responde una por petición.
-9. **Retransmisión.** Mientras no funcione en su firmware, EMG1 solo se puede probar entre vecinos directos.
-10. **Revisión de referencia.** Qué revisión de `EmergencyWire.h` se toma como contrato para el códec y los tests.
-
-## 6. Limitaciones y pendiente
+## 5. Limitaciones y pendiente
 
 - **Prueba con la placa a medias:** la conexión y la descarga de la configuración funcionan; falta comprobar la lista de nodos, los mensajes y la corrección del emparejamiento.
-- Solo la pestaña Nodos usa datos reales; chat, mapa y SOS siguen con datos simulados o locales.
 - **Sin persistencia:** historial y nodos viven en memoria.
 - **Sin reconexión automática:** tras perder el enlace hay que volver a vincular.
 - Al perder el enlace, los mensajes en `transmitted` dejan de seguirse y se quedan en ese estado.
@@ -393,4 +340,4 @@ Su firmware (Meshtastic 2.8.2 modificado) no es definitivo: las pruebas están p
 - `isGateway` sin implementar (siempre false con la placa real).
 - Emparejamiento con PIN, UUID con la placa real e iOS: sin probar.
 - La simulación no limita el tamaño del texto ni simula fallos.
-- SOS provisional (sección 5).
+- SOS: ver «Pendiente» en la sección 4.
