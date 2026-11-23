@@ -1,5 +1,6 @@
 import '../models/connection_status.dart';
 import '../models/discovered_device.dart';
+import '../models/emergency_alert.dart';
 import '../models/mesh_channel.dart';
 import '../models/mesh_message.dart';
 import '../models/mesh_node.dart';
@@ -85,14 +86,25 @@ abstract class MeshRepository {
   /// Lanza [StateError] sin conexión y [ArgumentError] si el texto está
   /// vacío o supera 233 bytes en UTF-8 (el simulador no mira el tamaño).
   Future<MeshMessage> sendText(String text, {int? toNode, int channel = 0});
-  /// Emite un SOS con la posición del nodo propio (si la tiene) y marca el
-  /// nodo propio en emergencia. Formato y política en `sos_protocol.dart`.
+  /// Difunde un SOS (EMG1 ALERT) con la posición del nodo propio, si la
+  /// tiene, y marca el nodo propio en emergencia. Formato y política en
+  /// `emergency_policy.dart`. También lo emite por [messages] con
+  /// [MeshMessage.isSos] y un texto legible.
   ///
   /// Lanza [StateError] sin conexión.
   Future<MeshMessage> sendSos();
-  /// Emite la cancelación del SOS y quita la marca de emergencia del nodo
-  /// propio. Lanza [StateError] sin conexión.
+  /// Difunde la cancelación (EMG1 RESOLVED) del último SOS y quita la marca
+  /// de emergencia del nodo propio. Lanza [StateError] sin conexión o si no
+  /// hay un SOS activo.
   Future<MeshMessage> cancelSos();
+
+  // --- Alertas de otros nodos ---
+  /// Emite cada alerta EMG1 de otro nodo al llegar y otra vez, con
+  /// `status` [EmergencyDeliveryStatus.resolved], cuando se cancela. Cada
+  /// alerta (origen + id) llega una sola vez aunque se reciba repetida.
+  Stream<EmergencyAlert> get alerts;
+  /// Alertas de otros nodos sin cancelar ni caducar, la más reciente última.
+  List<EmergencyAlert> get activeAlerts;
 
   Future<void> dispose();
 }

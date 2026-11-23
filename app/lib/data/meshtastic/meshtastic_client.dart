@@ -5,18 +5,20 @@ import 'dart:math';
 import 'package:flutter/foundation.dart' show debugPrint;
 
 import '../../core/constants/meshtastic_ble.dart';
+import '../../core/emergency_codec.dart';
 import '../../generated/meshtastic/channel.pb.dart' as pb;
 import '../../generated/meshtastic/mesh.pb.dart' as pb;
 import '../../generated/meshtastic/portnums.pbenum.dart' as pb;
 import '../../generated/meshtastic/telemetry.pb.dart' as pb;
 import '../../models/connection_status.dart';
 import '../../models/discovered_device.dart';
+import '../../models/emergency_alert.dart';
 import '../../models/mesh_channel.dart';
 import '../../models/mesh_message.dart';
 import '../../models/mesh_node.dart';
 import '../ble/mesh_transport.dart';
 import '../mesh_repository.dart';
-import 'sos_protocol.dart';
+import 'emergency_policy.dart';
 
 /// [MeshRepository] real: habla el protocolo de la Client API de Meshtastic
 /// (mensajes Protobuf `ToRadio`/`FromRadio`) sobre un [MeshTransport].
@@ -48,6 +50,8 @@ class MeshtasticClient implements MeshRepository {
   static final int maxPayloadBytes = pb.Constants.DATA_PAYLOAD_LEN.value;
   // Límite de mensajes a la espera de acuse; se descarta el más antiguo.
   static const int _maxPendingAcks = 100;
+  // Límite de alertas recordadas para descartar las repetidas.
+  static const int _maxSeenAlerts = 200;
 
   final MeshTransport _transport;
   final Duration _configTimeout;
@@ -59,6 +63,7 @@ class MeshtasticClient implements MeshRepository {
   final _nodesController = StreamController<List<MeshNode>>.broadcast();
   final _channelsController = StreamController<List<MeshChannel>>.broadcast();
   final _messagesController = StreamController<MeshMessage>.broadcast();
+  final _alertsController = StreamController<EmergencyAlert>.broadcast();
 
   ConnectionStatus _status = ConnectionStatus.disconnected;
   int? _myNodeNum;
@@ -67,6 +72,13 @@ class MeshtasticClient implements MeshRepository {
   final Map<int, MeshChannel> _channels = {};
   // Mensajes propios a la espera de acuse, por id de paquete.
   final Map<int, MeshMessage> _pendingAcks = {};
+  // Alertas activas de otros nodos, por EmergencyAlert.compositeKey.
+  final Map<String, EmergencyAlert> _activeAlerts = {};
+  // Alertas ya vistas (activas o canceladas), en orden de llegada.
+  final Set<String> _seenAlerts = {};
+  // SOS propio sin cancelar: su id EMG1 y el nodo que lo emitió. Se
+  // conserva al reconectar con el mismo nodo para poder cancelarlo.
+  ({int id, int originNode})? _ownSos;
   int? _configNonce;
   Completer<void>? _configDone;
 
@@ -104,6 +116,14 @@ class MeshtasticClient implements MeshRepository {
       // Por si la ficha del nodo propio llegó antes que my_info.
       final me = _myNodeNum;
       if (me != null && _nodes.containsKey(me)) _updateNode(me, (node) => node);
+      // La descarga vacía los nodos: se vuelven a marcar las emergencias.
+      if (_ownSos?.originNode != me) _ownSos = null;
+      if (me != null && _ownSos != null) {
+        _updateNode(me, (node) => node.copyWith(isEmergency: true));
+      }
+      for (final alert in _activeAlerts.values) {
+        _markEmergency(alert);
+      }
       // Durante la descarga no se publican las listas; se publican una vez.
       _publishNodes();
       _publishChannels();
@@ -336,28 +356,23 @@ class MeshtasticClient implements MeshRepository {
         final battery = _battery(telemetry.deviceMetrics);
         _updateNode(from, (node) => node.copyWith(batteryLevel: battery));
       }
-    } else if (port == pb.PortNum.TEXT_MESSAGE_APP ||
-        port == pb.PortNum.ALERT_APP) {
-      // Un SOS puede llegar por cualquiera de los dos puertos (ver SosPolicy).
-      _onText(packet, data);
+    } else if (port == pb.PortNum.TEXT_MESSAGE_APP) {
+      _emitReceived(
+        packet,
+        utf8.decode(data.payload, allowMalformed: true),
+      );
+    } else if (port == EmergencyPolicy.portNum) {
+      _onEmergency(packet, data);
     }
   }
 
-  void _onText(pb.MeshPacket packet, pb.Data data) {
+  // Publica un mensaje recibido de otro nodo (texto o SOS legible).
+  void _emitReceived(
+    pb.MeshPacket packet,
+    String content, {
+    bool isSos = false,
+  }) {
     final from = packet.from;
-    final text = utf8.decode(data.payload, allowMalformed: true);
-    final sos = SosCodec.tryDecode(text);
-    if (sos != null) {
-      // Se confía en el remitente del paquete, no en el id escrito en el texto.
-      _updateNode(
-        from,
-        (node) => node.copyWith(
-          isEmergency: sos.kind == SosKind.alert,
-          latitude: sos.latitude,
-          longitude: sos.longitude,
-        ),
-      );
-    }
     final isBroadcast = packet.to == AppConstants.broadcastAddress;
     _emitMessage(
       MeshMessage(
@@ -367,15 +382,138 @@ class MeshtasticClient implements MeshRepository {
         recipientId: isBroadcast
             ? MeshMessage.broadcastId
             : MeshNode.idFromNum(packet.to),
-        content: text,
+        content: content,
         timestamp: DateTime.now(),
         packetId: packet.id,
         senderNum: from,
         recipientNum: isBroadcast ? null : packet.to,
         channel: packet.channel,
-        isSos: sos != null,
+        isSos: isSos,
       ),
     );
+  }
+
+  // --- Alertas EMG1 (formato y reglas del firmware de Cristina) ---
+
+  @override
+  Stream<EmergencyAlert> get alerts => _alertsController.stream;
+
+  @override
+  List<EmergencyAlert> get activeAlerts => List.unmodifiable(
+    _activeAlerts.values.where((alert) => !alert.isExpired),
+  );
+
+  // Lo que no es un EMG1 válido se descarta sin error.
+  void _onEmergency(pb.MeshPacket packet, pb.Data data) {
+    if (packet.from == 0 || packet.from == _myNodeNum) return;
+    final EmgMessage emg;
+    try {
+      emg = EmgCodec.decode(data.payload);
+    } on FormatException catch (e) {
+      debugPrint('PRIVATE_APP descartado: $e');
+      return;
+    }
+    switch (emg.kind) {
+      case EmgKind.alert || EmgKind.replay:
+        _onAlert(packet, emg);
+      case EmgKind.resolved:
+        _onResolved(packet, emg);
+      case EmgKind.receipt || EmgKind.fetch:
+        // Los gestiona el propio firmware.
+        break;
+    }
+  }
+
+  void _onAlert(pb.MeshPacket packet, EmgMessage emg) {
+    final isReplay = emg.kind == EmgKind.replay;
+    // Un ALERT lo emite su origen; un REPLAY lo reenvía otro nodo que lo
+    // tenía guardado (respuesta a un FETCH).
+    if (!isReplay && emg.originNode != packet.from) return;
+    final key = _alertKey(emg);
+    if (!_markSeen(key)) return;
+
+    final position = EmergencyText.position(emg.text);
+    final alert = EmergencyAlert(
+      id: emg.id,
+      originNode: emg.originNode,
+      severity: emg.severity,
+      text: EmergencyText.body(emg.text),
+      expiresUnix: emg.expiresUnix,
+      senderNode: packet.from,
+      destinationNode: packet.to,
+      channel: packet.channel,
+      meshPacketId: packet.id,
+      receivedAt: DateTime.now(),
+      isReplay: isReplay,
+      latitude: position?.latitude,
+      longitude: position?.longitude,
+      // La firma de un REPLAY es la de quien lo reenvía, no la del origen.
+      isVerified: !isReplay && packet.xeddsaSigned,
+    );
+    if (alert.isExpired) return;
+
+    _activeAlerts[key] = alert;
+    _markEmergency(alert);
+    _emitAlert(alert);
+    _emitReceived(
+      packet,
+      EmergencyText.describe(
+        kind: EmgKind.alert,
+        body: alert.text,
+        latitude: alert.latitude,
+        longitude: alert.longitude,
+        verified: alert.isVerified,
+      ),
+      isSos: true,
+    );
+  }
+
+  void _onResolved(pb.MeshPacket packet, EmgMessage emg) {
+    if (emg.originNode != packet.from) return;
+    final key = _alertKey(emg);
+    // Si llega antes que su ALERT, el ALERT se descartará después.
+    _markSeen(key);
+    final alert = _activeAlerts.remove(key);
+    if (alert == null) return;
+
+    alert.status = EmergencyDeliveryStatus.resolved;
+    final origin = alert.originNode;
+    final stillActive = _activeAlerts.values.any((a) => a.originNode == origin);
+    _updateNode(origin, (node) => node.copyWith(isEmergency: stillActive));
+    _emitAlert(alert);
+    _emitReceived(
+      packet,
+      EmergencyText.describe(kind: EmgKind.resolved),
+      isSos: true,
+    );
+  }
+
+  // Marca el nodo de origen en emergencia, con la posición de la alerta.
+  void _markEmergency(EmergencyAlert alert) {
+    _updateNode(
+      alert.originNode,
+      (node) => node.copyWith(
+        isEmergency: true,
+        latitude: alert.latitude,
+        longitude: alert.longitude,
+      ),
+    );
+  }
+
+  // Devuelve false si la alerta ya se había visto.
+  bool _markSeen(String key) {
+    if (!_seenAlerts.add(key)) return false;
+    if (_seenAlerts.length > _maxSeenAlerts) {
+      _seenAlerts.remove(_seenAlerts.first);
+    }
+    return true;
+  }
+
+  // Misma clave que EmergencyAlert.compositeKey.
+  static String _alertKey(EmgMessage emg) => '${emg.originNode}_${emg.id}';
+
+  void _emitAlert(EmergencyAlert alert) {
+    if (!_alertsController.isClosed) _alertsController.add(alert);
   }
 
   // Acuse (o error) de un paquete enviado con want_ack.
@@ -429,7 +567,8 @@ class MeshtasticClient implements MeshRepository {
   @override
   Future<MeshMessage> sendText(String text, {int? toNode, int channel = 0}) {
     return _send(
-      text: text,
+      payload: utf8.encode(text),
+      content: text,
       portNum: pb.PortNum.TEXT_MESSAGE_APP,
       toNode: toNode,
       channel: channel,
@@ -438,40 +577,93 @@ class MeshtasticClient implements MeshRepository {
   }
 
   @override
-  Future<MeshMessage> sendSos() => _sendSos(SosKind.alert);
-
-  @override
-  Future<MeshMessage> cancelSos() => _sendSos(SosKind.cancel);
-
-  Future<MeshMessage> _sendSos(SosKind kind) async {
-    final me = _myNodeNum;
-    if (me == null) throw StateError('No hay ningún nodo conectado');
+  Future<MeshMessage> sendSos() async {
+    final me = _connectedNode();
     final self = _nodes[me];
     final fix = (self != null && self.hasPosition) ? self : null;
-    final message = await _send(
-      text: SosCodec.encode(
-        SosSignal(
-          kind: kind,
-          nodeNum: me,
+    // Cada SOS lleva un id nuevo: el firmware descarta un (origen, id) que
+    // ya ha visto.
+    final id = _newId();
+    final message = await _sendEmergency(
+      EmgMessage(
+        kind: EmgKind.alert,
+        severity: EmergencyPolicy.severity,
+        flags: 0,
+        id: id,
+        expiresUnix: EmergencyPolicy.expiresUnix,
+        originNode: me,
+        text: EmergencyText.encode(
           latitude: fix?.latitude,
           longitude: fix?.longitude,
         ),
       ),
-      portNum: SosPolicy.portNum,
-      channel: SosPolicy.channel,
-      hopLimit: SosPolicy.hopLimit,
-      priority: SosPolicy.priority,
-      isSos: true,
+      content: EmergencyText.describe(
+        kind: EmgKind.alert,
+        latitude: fix?.latitude,
+        longitude: fix?.longitude,
+      ),
     );
-    _updateNode(
-      me,
-      (node) => node.copyWith(isEmergency: kind == SosKind.alert),
-    );
+    _ownSos = (id: id, originNode: me);
+    _updateNode(me, (node) => node.copyWith(isEmergency: true));
     return message;
   }
 
+  @override
+  Future<MeshMessage> cancelSos() async {
+    final me = _connectedNode();
+    final sos = _ownSos;
+    if (sos == null || sos.originNode != me) {
+      throw StateError('No hay ningún SOS activo que cancelar');
+    }
+    // RESOLVED con el mismo id y origen que el ALERT que cancela.
+    final message = await _sendEmergency(
+      EmgMessage(
+        kind: EmgKind.resolved,
+        severity: EmergencyPolicy.severity,
+        flags: 0,
+        id: sos.id,
+        expiresUnix: EmergencyPolicy.expiresUnix,
+        originNode: me,
+      ),
+      content: EmergencyText.describe(kind: EmgKind.resolved),
+    );
+    _ownSos = null;
+    _updateNode(me, (node) => node.copyWith(isEmergency: false));
+    return message;
+  }
+
+  // Difunde un EMG1 con la política de EmergencyPolicy.
+  Future<MeshMessage> _sendEmergency(
+    EmgMessage emg, {
+    required String content,
+  }) {
+    return _send(
+      payload: EmgCodec.encode(emg),
+      content: content,
+      portNum: EmergencyPolicy.portNum,
+      channel: EmergencyPolicy.channel,
+      hopLimit: EmergencyPolicy.hopLimit,
+      priority: EmergencyPolicy.priority,
+      isSos: true,
+    );
+  }
+
+  // Número del nodo conectado; StateError si no hay conexión completa.
+  int _connectedNode() {
+    final me = _myNodeNum;
+    if (_status != ConnectionStatus.connected || me == null) {
+      throw StateError('No hay ningún nodo conectado');
+    }
+    return me;
+  }
+
+  // Id de 32 bits distinto de 0 (paquetes y alertas EMG1).
+  int _newId() => 1 + _random.nextInt(0xFFFFFFFF);
+
+  // [content] es lo que se muestra en el chat; [payload], lo que viaja.
   Future<MeshMessage> _send({
-    required String text,
+    required List<int> payload,
+    required String content,
     required pb.PortNum portNum,
     required int channel,
     required int hopLimit,
@@ -479,11 +671,7 @@ class MeshtasticClient implements MeshRepository {
     pb.MeshPacket_Priority? priority,
     bool isSos = false,
   }) async {
-    final me = _myNodeNum;
-    if (_status != ConnectionStatus.connected || me == null) {
-      throw StateError('No hay ningún nodo conectado');
-    }
-    final payload = utf8.encode(text);
+    final me = _connectedNode();
     if (payload.isEmpty) throw ArgumentError('El mensaje está vacío');
     if (payload.length > maxPayloadBytes) {
       throw ArgumentError(
@@ -493,7 +681,7 @@ class MeshtasticClient implements MeshRepository {
     }
 
     // El id se genera aquí (y no en el nodo) para poder casarlo con su acuse.
-    final id = 1 + _random.nextInt(0xFFFFFFFF);
+    final id = _newId();
     final packet = pb.MeshPacket(
       to: toNode ?? AppConstants.broadcastAddress,
       channel: channel,
@@ -510,7 +698,7 @@ class MeshtasticClient implements MeshRepository {
       recipientId: toNode == null
           ? MeshMessage.broadcastId
           : MeshNode.idFromNum(toNode),
-      content: text,
+      content: content,
       timestamp: DateTime.now(),
       isMe: true,
       status: MessageStatus.queued,
@@ -569,5 +757,6 @@ class MeshtasticClient implements MeshRepository {
     await _nodesController.close();
     await _channelsController.close();
     await _messagesController.close();
+    await _alertsController.close();
   }
 }

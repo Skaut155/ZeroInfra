@@ -3,13 +3,15 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import '../data/mesh_repository.dart';
+import '../models/emergency_alert.dart';
 import '../models/mesh_message.dart';
 import '../models/mesh_node.dart';
 
-/// Estado de la vista SOS: enviar y cancelar el SOS del nodo propio.
+/// Estado de la vista SOS: enviar y cancelar el SOS del nodo propio, y las
+/// alertas activas de otros nodos ([alerts]).
 ///
-/// Los SOS recibidos de otros nodos no pasan por aquí: llegan como
-/// [MeshNode.isEmergency] (`NodesProvider`) y como mensajes (`ChatProvider`).
+/// Los SOS recibidos también marcan el nodo con [MeshNode.isEmergency]
+/// (`NodesProvider`) y llegan como mensajes al chat (`ChatProvider`).
 class SosProvider extends ChangeNotifier {
   SosProvider(this._repository) {
     _me = _findMe(_repository.nodes);
@@ -18,6 +20,7 @@ class SosProvider extends ChangeNotifier {
         _me = _findMe(nodes);
         notifyListeners();
       }),
+      _repository.alerts.listen((_) => notifyListeners()),
       _repository.messages.listen((message) {
         if (message.isMe && message.isSos) {
           _lastSignal = message;
@@ -54,6 +57,9 @@ class SosProvider extends ChangeNotifier {
   MeshMessage? get lastSignal => _lastSignal;
   /// Motivo del último fallo; null si el último envío fue bien.
   String? get errorMessage => _errorMessage;
+  /// Alertas EMG1 de otros nodos sin cancelar ni caducar, la más reciente
+  /// última. [EmergencyAlert.isVerified] indica si la firma es válida.
+  List<EmergencyAlert> get alerts => _repository.activeAlerts;
 
   /// Envía un SOS (un solo paquete; los reintentos son cosa del firmware).
   /// Devuelve false si falla o si ya hay un envío en curso.
