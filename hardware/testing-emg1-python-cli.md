@@ -2,7 +2,7 @@
 
 **Contenido:** código C++ añadido, un aplicador de modificaciones para el firmware, una CLI para generar mensajes y pruebas unitarias independientes del hardware.
 
-**Importante.** Este paquete **no contiene el firmware completo ni un firmware binario**. Debes aplicarlo sobre un checkout limpio del repositorio `meshtastic/firmware` de una versión compatible. Se revisaron archivos de `develop` el **15 de noviembre de 2026**, pero no se pudo fijar un SHA remoto ni ejecutar aquí la compilación de PlatformIO porque no se dispone del repositorio completo ni del entorno de la placa. El aplicador comprueba los puntos de modificación y falla si el código diverge. El SHA real de tu checkout queda registrado en `emergency_base_sha.txt` después de aplicar.
+El SHA real de tu checkout queda registrado en `emergency_base_sha.txt` después de aplicar.
 
 En tu repositorio ya clonado, guarda tu trabajo y crea una rama nueva:
 
@@ -23,10 +23,9 @@ La primera ejecución solo comprueba que los archivos originales contienen **los
 
 ## Configuración obligatoria de los nodos
 
-1. Edita en el repositorio modificado `src/modules/optional/Emergency/EmergencyConfig.h`, sustituyendo `EMERGENCY_AUTHORIZED_ORIGINS[] = {0}` por los números de nodo de 32 bits que autorizas a participar, por ejemplo `{0x12345678, 0x87654321}`. `{0}` no permite ningún emisor. Copia una configuración coherente a todas las placas de tu laboratorio.
-2. Configura Meshtastic en la misma región LoRa y los mismos parámetros de canal para los cuatro dispositivos; no elimines CAD, límites de transmisión, cifrado ni control de airtime.
-3. Reserva `PRIVATE_APP=256` para este experimento. **El formato EMG1 es propio**; los clientes Meshtastic habituales no muestran estas alertas como mensajes de texto normales.
-4. Para proteger los mensajes, utiliza un canal con claves gestionadas correctamente. La lista de IDs no demuestra identidad criptográfica; para uso real hay que diseñar y verificar autenticación del emisor.
+1. Configura Meshtastic en la misma región LoRa y los mismos parámetros de canal para los cuatro dispositivos; no elimines CAD, límites de transmisión, cifrado ni control de airtime.
+2. Reserva `PRIVATE_APP=256` para este experimento. **El formato EMG1 es propio**; los clientes Meshtastic habituales no muestran estas alertas como mensajes de texto normales.
+3. Para proteger los mensajes, utiliza un canal con claves gestionadas correctamente. La lista de IDs no demuestra identidad criptográfica; para uso real hay que diseñar y verificar autenticación del emisor.
 
 ## Compilar (en tu ordenador con PlatformIO)
 
