@@ -29,7 +29,8 @@ class MeshMessage {
   /// [broadcastId] (o null) en una difusión; en un directo, el id del nodo
   /// destinatario.
   final String? recipientId;
-  /// Texto. En un SOS, el texto codificado por `SosCodec`.
+  /// Texto. En un SOS, una descripción legible (`EmergencyText.describe`);
+  /// lo que viaja por radio es un EMG1 binario.
   final String content;
   /// Hora de envío o de recepción en este móvil.
   final DateTime timestamp;
@@ -49,7 +50,7 @@ class MeshMessage {
   final int? recipientNum;
   /// Índice del canal (`MeshChannel.index`) por el que viaja.
   final int channel;
-  /// Es un SOS o su cancelación (formato de `sos_protocol.dart`).
+  /// Es un SOS o su cancelación (EMG1, ver `emergency_policy.dart`).
   final bool isSos;
 
   /// Valor de [recipientId] en una difusión (el texto que ya usaba Carlos).

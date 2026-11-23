@@ -1,12 +1,14 @@
 import 'dart:async';
 import 'dart:math';
 
+import '../../core/emergency_codec.dart';
 import '../../models/connection_status.dart';
 import '../../models/discovered_device.dart';
+import '../../models/emergency_alert.dart';
 import '../../models/mesh_channel.dart';
 import '../../models/mesh_message.dart';
 import '../../models/mesh_node.dart';
-import '../meshtastic/sos_protocol.dart';
+import '../meshtastic/emergency_policy.dart';
 import '../mesh_repository.dart';
 
 /// Malla simulada para desarrollar la interfaz sin placa (emulador o
@@ -14,8 +16,10 @@ import '../mesh_repository.dart';
 ///
 /// Al conectar crea 4 nodos alrededor del Campus Nord (uno sin GPS) y 2
 /// canales; cada 20 s llega un mensaje de otro nodo y los envíos propios
-/// pasan por queued → transmitted (0,3 s) → ack (1,5 s). No limita el
-/// tamaño del texto ni simula fallos de entrega. También la usa
+/// pasan por queued → transmitted (0,3 s) → ack (1,5 s). A los 30 s llega
+/// un SOS verificado del «Repetidor A5», que se cancela 60 s después, y a
+/// los 45 s uno sin verificar del «Nodo sin GPS», que no se cancela. No
+/// limita el tamaño del texto ni simula fallos de entrega. También la usa
 /// `widget_test.dart`.
 class FakeMeshRepository implements MeshRepository {
   static const int _myNum = 0x0a0b0c01;
@@ -31,6 +35,7 @@ class FakeMeshRepository implements MeshRepository {
   final _nodesController = StreamController<List<MeshNode>>.broadcast();
   final _channelsController = StreamController<List<MeshChannel>>.broadcast();
   final _messagesController = StreamController<MeshMessage>.broadcast();
+  final _alertsController = StreamController<EmergencyAlert>.broadcast();
 
   // Todos los temporizadores vivos, para cancelarlos al desconectar.
   final Set<Timer> _timers = {};
@@ -40,6 +45,8 @@ class FakeMeshRepository implements MeshRepository {
   List<MeshChannel> _channels = const [];
   int _nextId = 1;
   bool _disposed = false;
+  bool _sosActive = false;
+  final Map<String, EmergencyAlert> _activeAlerts = {};
 
   // Ejecuta [action] tras [delay] salvo que se haya desconectado o liberado.
   void _later(Duration delay, void Function() action) {
@@ -150,6 +157,12 @@ class FakeMeshRepository implements MeshRepository {
         ])
           node.nodeNum: node,
       });
+    // Cada conexión empieza un mundo simulado nuevo; el SOS propio se
+    // mantiene, como en el cliente real.
+    _activeAlerts.clear();
+    if (_sosActive) {
+      _nodes[_myNum] = _nodes[_myNum]!.copyWith(isEmergency: true);
+    }
     _channels = const [
       MeshChannel(index: 0, name: '', role: MeshChannelRole.primary),
       MeshChannel(index: 1, name: 'Rescate', role: MeshChannelRole.secondary),
@@ -158,6 +171,106 @@ class FakeMeshRepository implements MeshRepository {
     _nodesController.add(nodes);
     _channelsController.add(channels);
     _scheduleIncoming();
+    _scheduleAlerts();
+  }
+
+  // Dos SOS de vecinos: uno verificado que se cancela y otro sin verificar.
+  void _scheduleAlerts() {
+    _later(
+      const Duration(seconds: 30),
+      () => _receiveAlert(
+        0x0a0b0c03,
+        id: 1,
+        latitude: 41.38720,
+        longitude: 2.11180,
+        verified: true,
+      ),
+    );
+    _later(
+      const Duration(seconds: 45),
+      () => _receiveAlert(0x0a0b0c04, id: 2, verified: false),
+    );
+    _later(
+      const Duration(seconds: 90),
+      () => _resolveAlert(0x0a0b0c03, id: 1),
+    );
+  }
+
+  void _receiveAlert(
+    int origin, {
+    required int id,
+    required bool verified,
+    double? latitude,
+    double? longitude,
+  }) {
+    final alert = EmergencyAlert(
+      id: id,
+      originNode: origin,
+      severity: EmergencyPolicy.severity,
+      text: EmergencyPolicy.text,
+      expiresUnix: EmergencyPolicy.expiresUnix,
+      senderNode: origin,
+      destinationNode: 0xFFFFFFFF,
+      channel: EmergencyPolicy.channel,
+      meshPacketId: _nextId,
+      receivedAt: DateTime.now(),
+      latitude: latitude,
+      longitude: longitude,
+      isVerified: verified,
+    );
+    _activeAlerts[alert.compositeKey] = alert;
+    final node = _nodes[origin];
+    if (node != null) {
+      _nodes[origin] = node.copyWith(
+        isEmergency: true,
+        latitude: latitude,
+        longitude: longitude,
+      );
+      _nodesController.add(nodes);
+    }
+    _alertsController.add(alert);
+    _receiveSosMessage(
+      origin,
+      EmergencyText.describe(
+        kind: EmgKind.alert,
+        latitude: latitude,
+        longitude: longitude,
+        verified: verified,
+      ),
+    );
+  }
+
+  void _resolveAlert(int origin, {required int id}) {
+    final alert = _activeAlerts.remove('${origin}_$id');
+    if (alert == null) return;
+    alert.status = EmergencyDeliveryStatus.resolved;
+    final node = _nodes[origin];
+    if (node != null) {
+      _nodes[origin] = node.copyWith(isEmergency: false);
+      _nodesController.add(nodes);
+    }
+    _alertsController.add(alert);
+    _receiveSosMessage(
+      origin,
+      EmergencyText.describe(kind: EmgKind.resolved),
+    );
+  }
+
+  void _receiveSosMessage(int origin, String content) {
+    final sender = _nodes[origin];
+    _messagesController.add(
+      MeshMessage(
+        id: 'fake_${_nextId++}',
+        senderId: MeshNode.idFromNum(origin),
+        senderName: sender?.name ?? MeshNode.idFromNum(origin),
+        recipientId: MeshMessage.broadcastId,
+        content: content,
+        timestamp: DateTime.now(),
+        senderNum: origin,
+        channel: EmergencyPolicy.channel,
+        isSos: true,
+      ),
+    );
   }
 
   // Cada cierto tiempo, otro nodo «escribe» por el canal primario.
@@ -210,32 +323,50 @@ class FakeMeshRepository implements MeshRepository {
   }
 
   @override
-  Future<MeshMessage> sendSos() => _sendSos(SosKind.alert);
-
-  @override
-  Future<MeshMessage> cancelSos() => _sendSos(SosKind.cancel);
-
-  Future<MeshMessage> _sendSos(SosKind kind) async {
+  Future<MeshMessage> sendSos() async {
     final me = _nodes[_myNum];
     final fix = (me != null && me.hasPosition) ? me : null;
     final message = await _send(
-      SosCodec.encode(
-        SosSignal(
-          kind: kind,
-          nodeNum: _myNum,
-          latitude: fix?.latitude,
-          longitude: fix?.longitude,
-        ),
+      EmergencyText.describe(
+        kind: EmgKind.alert,
+        latitude: fix?.latitude,
+        longitude: fix?.longitude,
       ),
-      channel: SosPolicy.channel,
+      channel: EmergencyPolicy.channel,
       isSos: true,
     );
-    if (me != null) {
-      _nodes[_myNum] = me.copyWith(isEmergency: kind == SosKind.alert);
-      _nodesController.add(nodes);
-    }
+    _setMyEmergency(true);
     return message;
   }
+
+  @override
+  Future<MeshMessage> cancelSos() async {
+    if (_status.isConnected && !_sosActive) {
+      throw StateError('No hay ningún SOS activo que cancelar');
+    }
+    final message = await _send(
+      EmergencyText.describe(kind: EmgKind.resolved),
+      channel: EmergencyPolicy.channel,
+      isSos: true,
+    );
+    _setMyEmergency(false);
+    return message;
+  }
+
+  void _setMyEmergency(bool active) {
+    _sosActive = active;
+    final me = _nodes[_myNum];
+    if (me == null) return;
+    _nodes[_myNum] = me.copyWith(isEmergency: active);
+    _nodesController.add(nodes);
+  }
+
+  @override
+  Stream<EmergencyAlert> get alerts => _alertsController.stream;
+
+  @override
+  List<EmergencyAlert> get activeAlerts =>
+      List.unmodifiable(_activeAlerts.values);
 
   // Recorre los estados de entrega como lo haría un nodo real.
   Future<MeshMessage> _send(
@@ -287,5 +418,6 @@ class FakeMeshRepository implements MeshRepository {
     await _nodesController.close();
     await _channelsController.close();
     await _messagesController.close();
+    await _alertsController.close();
   }
 }
